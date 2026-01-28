@@ -4,6 +4,16 @@ class LottoDisplay extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.innerHTML = `
       <style>
+        :host {
+          --number-bg-color: #f0f0f0;
+          --number-text-color: #333;
+          --shadow-color: rgba(0,0,0,0.1);
+        }
+        :host-context(body.dark-mode) {
+          --number-bg-color: #5a5a5a;
+          --number-text-color: #f0f2f5;
+          --shadow-color: rgba(0,0,0,0.7);
+        }
         .lotto-numbers {
           display: flex;
           justify-content: center;
@@ -14,14 +24,14 @@ class LottoDisplay extends HTMLElement {
           width: 50px;
           height: 50px;
           border-radius: 50%;
-          background-color: #f0f0f0;
+          background-color: var(--number-bg-color);
           display: flex;
           justify-content: center;
           align-items: center;
           font-size: 1.5rem;
           font-weight: bold;
-          color: #333;
-          box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+          color: var(--number-text-color);
+          box-shadow: 0 4px 8px var(--shadow-color);
           transition: all 0.3s ease;
         }
       </style>
@@ -37,19 +47,9 @@ class LottoDisplay extends HTMLElement {
             const numberDiv = document.createElement('div');
             numberDiv.className = 'number';
             numberDiv.textContent = number;
-            numberDiv.style.backgroundColor = this.getNumberColor(number);
-            numberDiv.style.color = 'white';
             container.appendChild(numberDiv);
         }, index * 200);
     });
-  }
-
-  getNumberColor(number) {
-    if (number <= 10) return '#f39c12'; // 주황색
-    if (number <= 20) return '#3498db'; // 파란색
-    if (number <= 30) return '#e74c3c'; // 빨간색
-    if (number <= 40) return '#2ecc71'; // 녹색
-    return '#9b59b6'; // 보라색
   }
 }
 
@@ -67,3 +67,13 @@ function generateLottoNumbers() {
   }
   return Array.from(numbers).sort((a, b) => a - b);
 }
+
+document.getElementById('theme-toggle').addEventListener('click', () => {
+    document.body.classList.toggle('dark-mode');
+    const themeToggle = document.getElementById('theme-toggle');
+    if (document.body.classList.contains('dark-mode')) {
+        themeToggle.textContent = '☀️';
+    } else {
+        themeToggle.textContent = '🌙';
+    }
+});

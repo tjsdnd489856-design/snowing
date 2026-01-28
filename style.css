@@ -9,6 +9,13 @@
     --shadow-color: rgba(0, 0, 0, 0.1);
 }
 
+body.dark-mode {
+    --main-bg-color: #2c2c2c;
+    --container-bg-color: #3a3a3a;
+    --text-color: #f0f2f5;
+    --shadow-color: rgba(0, 0, 0, 0.5);
+}
+
 body {
     font-family: 'Nanum Gothic', sans-serif;
     background-color: var(--main-bg-color);
@@ -17,9 +24,11 @@ body {
     align-items: center;
     min-height: 100vh;
     margin: 0;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .container {
+    position: relative;
     background-color: var(--container-bg-color);
     padding: 2rem;
     border-radius: 1rem;
@@ -27,6 +36,17 @@ body {
     text-align: center;
     width: 90%;
     max-width: 400px;
+}
+
+#theme-toggle {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--text-color);
 }
 
 h1 {
