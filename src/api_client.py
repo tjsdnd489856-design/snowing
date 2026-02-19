@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """공공데이터포털(의료기기 표준코드) API 연동 클래스"""
+    """식약처 의료기기 표준코드 DB 연동 클래스"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY")
@@ -20,20 +20,22 @@ class APIClient:
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str, retries: int = 3) -> Optional[Dict]:
-        """UDI 또는 GTIN으로 제품 정보를 조회합니다."""
+        """정부 DB에서 모델명(브랜드명)과 규격(도수)을 찾아옵니다."""
         if not identifier: return None
         
-        # 1. 캐시 확인
         if identifier in self.cache:
             entry = self.cache[identifier]
             if datetime.now() < entry['expiry']: return entry['data']
 
-        # 2. 검색 시도 (gtin_code와 udi_code 두 가지 파라미터를 시도)
-        # 먼저 gtin_code로 시도해보고 없으면 udi_code로 시도합니다.
-        search_params = ["gtin_code", "udi_code"]
-        
-        for param_name in search_params:
-            url = f"{self.base_url}/getMdeqStdCdUnityInfoInq01"
+        # 엔드포인트가 중복되지 않도록 처리
+        endpoint = "getMdeqStdCdUnityInfoInq01"
+        if not self.base_url.endswith(endpoint):
+            url = f"{self.base_url}/{endpoint}" if not self.base_url.endswith('/') else f"{self.base_url}{endpoint}"
+        else:
+            url = self.base_url
+
+        # gtin_code로 먼저 찾고, 없으면 udi_code로 시도
+        for param_name in ["gtin_code", "udi_code"]:
             params = {
                 "serviceKey": self.api_key,
                 "type": "json",
@@ -47,25 +49,31 @@ class APIClient:
                     response = requests.get(url, params=params, timeout=10)
                     if response.status_code == 200:
                         result = response.json()
+                        # 공공데이터 API의 복잡한 계층 구조 파싱
                         body = result.get('body', {})
                         items = body.get('items', [])
                         
                         if items and len(items) > 0:
                             item = items[0]
-                            # 공공데이터 필드 매핑
-                            # MDEQ_PRDLST_NM: 제품명, SPEC_NM: 규격(여기에 도수가 포함됨)
+                            # MODEL_NM: 우리가 아는 실제 제품명 (예: 클라렌 아이리스)
+                            # SPEC_NM: 도수, 곡률 등이 포함된 상세 규격
+                            # MDEQ_PRDLST_NM: 품목명 (예: 소프트콘택트렌즈)
+                            name = item.get('MODEL_NM') or item.get('PRDLST_NM') or item.get('MDEQ_PRDLST_NM')
+                            power = item.get('SPEC_NM') or "N/A"
+                            
                             data = {
-                                'name': item.get('MDEQ_PRDLST_NM') or item.get('PRDLST_NM') or "이름 없는 제품",
-                                'power': item.get('SPEC_NM') or "N/A",
-                                'manufacturer': item.get('ENTP_NM') or "N/A",
-                                'gtin': item.get('GTIN_CODE') or ""
+                                'name': name,
+                                'power': power,
+                                'manufacturer': item.get('ENTP_NM', 'N/A'),
+                                'gtin': item.get('GTIN_CODE', identifier)
                             }
+                            
                             self.cache[identifier] = {
                                 'data': data,
                                 'expiry': datetime.now() + timedelta(hours=self.cache_ttl)
                             }
                             return data
-                    break # 에러 아니면 리트라이 중단하고 다음 파라미터로
+                    break 
                 except Exception as e:
                     self.logger.error(f"네트워크 오류: {e}")
                     time.sleep(1)
