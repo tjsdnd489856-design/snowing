@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """모든 필드명을 자동 검색하는 초정밀 API 클라이언트"""
+    """중첩된 'ITEM' 구조를 완벽하게 파싱하는 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
@@ -21,7 +21,7 @@ class APIClient:
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """정부 응답의 모든 필드를 뒤져서 이름과 도수를 찾아냅니다."""
+        """정부 DB의 중첩된 상자(ITEM)를 열어 실제 데이터를 추출합니다."""
         if not identifier: return None
         
         gtin = identifier.zfill(14)
@@ -46,38 +46,42 @@ class APIClient:
                         item_list = items_wrapper
 
                     if item_list and len(item_list) > 0:
-                        item = item_list[0]
+                        # 1단계 아이템 꺼내기
+                        target = item_list[0]
                         
-                        # 모든 필드명을 대문자로 통일하여 검색 (변종 대응)
-                        raw = {str(k).upper(): v for k, v in item.items()}
+                        # [핵심] 'ITEM' 또는 'item' 상자가 안에 또 들어있는 경우, 그 안으로 들어감
+                        if isinstance(target, dict):
+                            nested = target.get('ITEM') or target.get('item')
+                            if nested:
+                                target = nested
+
+                        # 필드명을 대문자로 통일하여 알맹이 찾기
+                        raw = {str(k).upper(): v for k, v in target.items()}
                         
-                        # 1. 제품명 찾기 (가능한 모든 후보군)
-                        model = raw.get('MODEL_NM') or raw.get('MODELNM') or raw.get('ITEM_NM') or raw.get('PRD_NM') or ""
-                        prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or raw.get('MDEQPRDLSTNM') or ""
-                        entp = raw.get('ENTP_NM') or raw.get('ENTPNM') or ""
+                        # 제품명 후보군
+                        model = raw.get('MODEL_NM') or raw.get('MODELNM') or ""
+                        prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or ""
+                        spec = raw.get('SPEC_NM') or raw.get('SPECNM') or "N/A"
+                        entp = raw.get('ENTP_NM') or raw.get('ENTPNM') or "N/A"
                         
-                        # 2. 도수/규격 찾기
-                        spec = raw.get('SPEC_NM') or raw.get('SPECNM') or raw.get('SPEC') or "N/A"
-                        
-                        # 이름 조립
+                        # 최종 이름 결정
                         name = ""
                         if model and prdlst: name = f"[{model}] {prdlst}"
                         elif model: name = model
                         elif prdlst: name = prdlst
                         else: name = "이름 정보 없음"
 
-                        self.logger.info(f"데이터 추출 성공: {name} ({spec})")
-                        
-                        # 만약 여전히 이름이 없으면 필드 목록을 출력하여 디버깅 도움
-                        if name == "이름 정보 없음":
-                            self.logger.warning(f"사용 가능한 필드들: {list(raw.keys())}")
-
-                        return {
-                            'name': str(name).strip(),
-                            'power': str(spec).strip(),
-                            'manufacturer': str(entp).strip(),
-                            'gtin': raw.get('GTIN_CODE') or gtin
-                        }
+                        if name != "이름 정보 없음":
+                            self.logger.info(f"알맹이 추출 성공: {name} ({spec})")
+                            return {
+                                'name': str(name).strip(),
+                                'power': str(spec).strip(),
+                                'manufacturer': str(entp).strip(),
+                                'gtin': raw.get('GTIN_CODE') or gtin
+                            }
+                        else:
+                            # 실패 시 내용물 분석을 위해 전체 출력
+                            self.logger.warning(f"상자 안의 내용물: {list(raw.keys())}")
             except Exception as e:
                 self.logger.error(f"접속 오류: {e}")
         
