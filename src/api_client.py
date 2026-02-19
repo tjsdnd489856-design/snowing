@@ -9,78 +9,92 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """외부 제품 메타데이터 API 연동 클래스"""
+    """공공데이터포털(의료기기 표준코드) API 연동 클래스"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY")
-        self.base_url = os.getenv("LENS_API_BASE_URL", "https://api.example.com/v1")
+        self.base_url = os.getenv("LENS_API_BASE_URL")
         self.cache: Dict[str, Dict[str, Any]] = {}
-        self.cache_ttl = 24  # 시간
+        self.cache_ttl = 24
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
-    def _get_from_cache(self, gtin: str) -> Optional[Dict]:
-        """캐시에서 데이터 조회 (TTL 체크)"""
-        if gtin in self.cache:
-            entry = self.cache[gtin]
+    def _get_from_cache(self, udi: str) -> Optional[Dict]:
+        if udi in self.cache:
+            entry = self.cache[udi]
             if datetime.now() < entry['expiry']:
                 return entry['data']
-            del self.cache[gtin]
+            del self.cache[udi]
         return None
 
-    def _save_to_cache(self, gtin: str, data: Dict):
-        """데이터를 캐시에 저장"""
-        self.cache[gtin] = {
+    def _save_to_cache(self, udi: str, data: Dict):
+        self.cache[udi] = {
             'data': data,
             'expiry': datetime.now() + timedelta(hours=self.cache_ttl)
         }
 
-    def fetch_product_info(self, gtin: str, retries: int = 3) -> Optional[Dict]:
-        """외부 API로부터 제품 정보 조회 (재시도 로직 포함)"""
-        # 1. 캐시 확인
-        cached_data = self._get_from_cache(gtin)
+    def fetch_product_info(self, udi: str, retries: int = 3) -> Optional[Dict]:
+        """공공데이터 API를 호출하여 의료기기 정보를 가져옵니다."""
+        cached_data = self._get_from_cache(udi)
         if cached_data:
-            self.logger.info(f"캐시에서 데이터를 불러왔습니다: {gtin}")
             return cached_data
 
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        url = f"{self.base_url}/products/{gtin}"
+        # 공공데이터포털 상세 코드 조회 엔드포인트 (기본값에 오퍼레이션 추가)
+        url = f"{self.base_url}/getMdeqStdCdUnityInfoInq01"
+        
+        # 공공데이터 규격 파라미터
+        params = {
+            "serviceKey": self.api_key,
+            "type": "json",
+            "udi_code": udi,  # UDI 코드로 검색
+            "pageNo": "1",
+            "numOfRows": "1"
+        }
 
         for i in range(retries):
             try:
-                response = requests.get(url, headers=headers, timeout=5)
+                # 공공데이터 API는 인증키가 인코딩된 상태로 전달되어야 할 때가 있어 params로 전달
+                response = requests.get(url, params=params, timeout=10)
                 
                 if response.status_code == 200:
-                    data = response.json()
-                    self._save_to_cache(gtin, data)
-                    return data
+                    result = response.json()
+                    # 공공데이터 결과 구조 분석 (body -> items -> item)
+                    try:
+                        items = result.get('body', {}).get('items', [])
+                        if items:
+                            item = items[0]
+                            data = {
+                                'name': item.get('MDEQ_PRDLST_NM', '알 수 없는 제품'),
+                                'power': item.get('SPEC_NM', 'N/A'),
+                                'manufacturer': item.get('ENTP_NM', 'N/A'),
+                                'gtin': item.get('GTIN_CODE', '')
+                            }
+                            self._save_to_cache(udi, data)
+                            return data
+                    except (IndexError, AttributeError):
+                        self.logger.warning("검색 결과가 없습니다.")
+                        return None
+                
                 elif response.status_code == 429:
-                    self.logger.warning("Rate limit 도달. 대기 후 재시도...")
-                    time.sleep(2 ** i)  # 지수 백오프
-                elif 500 <= response.status_code < 600:
-                    self.logger.error(f"서버 오류 ({response.status_code}). 재시도 중...")
-                    time.sleep(1)
+                    time.sleep(2 ** i)
                 else:
                     self.logger.error(f"API 오류: {response.status_code}")
                     break
 
-            except requests.exceptions.RequestException as e:
+            except Exception as e:
                 self.logger.error(f"네트워크 오류: {e}")
                 time.sleep(1)
 
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict, policy: str = "api_priority") -> Dict:
-        """외부 API 데이터와 로컬 데이터 동기화 정책 적용"""
         synced = local_data.copy()
-        
         if policy == "api_priority":
-            # API 데이터로 덮어쓰기 (중요 정보 우선)
             synced.update({
                 'name': api_data.get('name', local_data.get('name')),
                 'power': api_data.get('power', local_data.get('power')),
+                'gtin': api_data.get('gtin', local_data.get('gtin')),
                 'source': 'api',
-                'change_log': f"Synced from API at {datetime.now()}"
+                'change_log': f"Synced from Public Data API at {datetime.now()}"
             })
-        
         return synced
