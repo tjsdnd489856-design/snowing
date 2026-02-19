@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """정부 API의 모든 구석을 뒤져서 제품명을 찾아내는 무차별 추출 클라이언트"""
+    """정부 API 응답에서 PRDT_ADD_EXPL 필드를 정밀 분석하는 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
@@ -20,80 +20,68 @@ class APIClient:
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
-    def _deep_search(self, data: Any) -> Dict[str, str]:
-        """JSON 데이터 전체를 훑어서 가장 이름/도수 같은 데이터를 뽑아냅니다."""
-        found = {"name": "", "power": "", "all_texts": []}
+    def _extract_info(self, text: str) -> Dict[str, str]:
+        """텍스트에서 제품명과 도수를 분리합니다. (예: PURSFIT 1DAY AIRCLEAR(10P) -7.00)"""
+        # 1. 도수 찾기 (예: -7.00, +2.50 등)
+        power_match = re.search(r'([+-]?\d+\.\d{2})', text)
+        power = power_match.group(1) if power_match else "N/A"
         
-        def walk(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    # 키 이름에 NM, NAME, MODEL, SPEC, PRD 등이 있으면 우선 순위
-                    k_upper = str(k).upper()
-                    if any(kw in k_upper for kw in ["NM", "NAME", "MODEL", "PRD"]):
-                        if v and len(str(v)) > 1 and not found["name"]:
-                            found["name"] = str(v)
-                    if any(kw in k_upper for kw in ["SPEC", "SIZE", "VOL"]):
-                        if v and not found["power"]:
-                            found["power"] = str(v)
-                    walk(v)
-            elif isinstance(obj, list):
-                for item in obj: walk(item)
-            elif isinstance(obj, str):
-                if len(obj) > 1: found["all_texts"].append(obj)
-
-        walk(data)
+        # 2. 제품명 정리 (도수 부분과 불필요한 괄호 제거)
+        name = text
+        if power != "N/A":
+            name = name.replace(power, "")
         
-        # 만약 전용 키로 못 찾았다면, 한글이 포함된 가장 긴 텍스트를 이름으로 추정
-        if not found["name"] and found["all_texts"]:
-            ko_texts = [t for t in found["all_texts"] if re.search("[가-힣]", t)]
-            if ko_texts:
-                found["name"] = max(ko_texts, key=len)
+        # (10P), (30P) 같은 수량 정보나 특수문자 정리
+        name = re.sub(r'\(\d+P\)', '', name)
+        name = name.strip("- ").strip()
         
-        return found
+        return {"name": name, "power": power}
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """정부 서버가 주는 모든 텍스트를 분석하여 정보를 추출합니다."""
+        """PRDT_ADD_EXPL 필드를 분석하여 제품명과 도수를 완벽히 가져옵니다."""
         if not identifier: return None
         
-        # 모든 가능한 검색 번호 조합
-        search_vals = [identifier.zfill(14), identifier[-13:], identifier]
-        search_vals = list(dict.fromkeys(search_vals))
+        gtin = identifier.zfill(14)
+        # 확인된 정확한 엔드포인트
+        url = f"{self.base_url}/getMdeqStdCdUnityInfoInq01"
         
-        # 시도할 주소 목록 (표준코드 조회 우선)
-        endpoints = [
-            f"{self.base_url}/getMdeqStdCdInq01",
-            f"{self.base_url}/getMdeqStdCdUnityInfoInq01",
-            self.base_url
-        ]
+        for param in ["udi_code", "gtin_code", "udi_di"]:
+            full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{param}={gtin}"
+            try:
+                response = requests.get(full_url, timeout=10)
+                if response.status_code == 200:
+                    res_data = response.json()
+                    
+                    # 모든 필드를 평면화하여 검색
+                    def walk(obj):
+                        if isinstance(obj, dict):
+                            # 우리가 찾은 핵심 필드 확인
+                            if 'PRDT_ADD_EXPL' in obj and obj['PRDT_ADD_EXPL']:
+                                return obj['PRDT_ADD_EXPL']
+                            for v in obj.values():
+                                res = walk(v)
+                                if res: return res
+                        elif isinstance(obj, list):
+                            for i in obj:
+                                res = walk(i)
+                                if res: return res
+                        return None
 
-        for url in endpoints:
-            for val in search_vals:
-                for param in ["gtin_code", "udi_code", "udi_di"]:
-                    full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{param}={val}"
-                    try:
-                        response = requests.get(full_url, timeout=10)
-                        if response.status_code == 200:
-                            res_data = response.json()
-                            
-                            # 데이터가 비어있는지 확인
-                            if "body" not in str(res_data).lower(): continue
-                            
-                            # 무차별 심층 검색 시작
-                            result = self._deep_search(res_data)
-                            
-                            if result["name"]:
-                                self.logger.info(f"데이터 추출 성공! 제품명: {result['name']}")
-                                return {
-                                    'name': result['name'].strip(),
-                                    'power': result['power'].strip() or "N/A",
-                                    'manufacturer': "정부 DB 등록 제품",
-                                    'gtin': val
-                                }
-                            else:
-                                # 데이터를 받았는데도 이름을 못 찾은 경우 원본 로그 출력
-                                self.logger.warning(f"데이터는 받았으나 분석 실패. 응답 요약: {str(res_data)[:200]}...")
-                    except Exception:
-                        continue
+                    raw_text = walk(res_data)
+                    
+                    if raw_text:
+                        self.logger.info(f"데이터 발견: {raw_text}")
+                        extracted = self._extract_info(raw_text)
+                        
+                        return {
+                            'name': extracted['name'],
+                            'power': extracted['power'],
+                            'manufacturer': "정부 DB 등록 제품",
+                            'gtin': gtin
+                        }
+            except Exception as e:
+                self.logger.error(f"오류 발생: {e}")
+                continue
         
         return None
 
