@@ -1,1 +1,7 @@
 firebase-debug.log
+.env
+__pycache__/
+*.py[cod]
+*.sqlite3
+.pytest_cache/
+lens_manager/src/cache/
