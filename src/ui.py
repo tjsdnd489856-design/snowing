@@ -11,7 +11,6 @@ class LensUI:
         self.console = Console()
 
     def display_menu(self):
-        """메인 메뉴 표시"""
         menu_text = (
             "[bold cyan]1.[/bold cyan] 바코드 스캔 (USB/이미지)\n"
             "[bold cyan]2.[/bold cyan] 전체 제품 목록 조회\n"
@@ -23,10 +22,9 @@ class LensUI:
         self.console.print(Panel(menu_text, title="콘택트렌즈 관리 시스템", subtitle="v1.0"))
 
     def show_products(self, products: List[Dict], title: str = "제품 목록"):
-        """제품 목록을 테이블로 출력"""
         table = Table(title=title, show_header=True, header_style="bold magenta")
         table.add_column("ID", style="dim", width=4)
-        table.add_column("제품명", width=20)
+        table.add_column("제품명", width=25)
         table.add_column("도수", justify="center")
         table.add_column("유통기한", justify="center")
         table.add_column("상태", justify="center")
@@ -35,24 +33,29 @@ class LensUI:
         now = datetime.now().date()
 
         for p in products:
-            expire_date = datetime.strptime(p['expire_date'], "%Y-%m-%d").date()
             status = ""
             row_style = ""
+            expire_str = p.get('expire_date', '9999-12-31')
 
-            if expire_date < now:
-                status = "[bold red]만료됨[/bold red]"
-                row_style = "on red"
-            elif (expire_date - now).days <= 30:
-                status = "[bold yellow]임박[/bold yellow]"
-                row_style = "yellow"
-            else:
-                status = "[green]정상[/green]"
+            try:
+                expire_date = datetime.strptime(expire_str, "%Y-%m-%d").date()
+                if expire_date < now:
+                    status = "[bold red]만료됨[/bold red]"
+                    row_style = "on red"
+                elif (expire_date - now).days <= 30:
+                    status = "[bold yellow]임박[/bold yellow]"
+                    row_style = "yellow"
+                else:
+                    status = "[green]정상[/green]"
+            except Exception:
+                status = "[white]날짜오류[/white]"
+                expire_str = "N/A"
 
             table.add_row(
                 str(p['id']),
-                p['name'],
-                p['power'],
-                p['expire_date'],
+                p['name'] if p['name'] else "이름 없음",
+                p['power'] if p['power'] else "N/A",
+                expire_str,
                 status,
                 str(p['qty']),
                 style=row_style
