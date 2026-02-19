@@ -2,13 +2,14 @@ import os
 import requests
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional, Any, List
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class APIClient:
-    """MsUdedi 2단계 공정을 최우선으로 하되 모든 서랍을 뒤지는 정밀 진단 클라이언트"""
+    """모든 파라미터 명칭을 시도하여 500 에러를 피하고 정보를 찾아내는 최종 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
@@ -21,83 +22,72 @@ class APIClient:
 
     def _clean_val(self, val: Any) -> str:
         if not val: return ""
-        # 쉼표, 따옴표 등 모든 불순물 제거 후 순수 텍스트만 추출
         return str(val).strip().replace('"', '').replace('}', '').replace(',', '').replace(';', '')
 
     def _extract_info(self, content: str) -> Optional[Dict[str, str]]:
-        """데이터 뭉치에서 제품명과 도수 추출"""
-        fields = ["PRDT_NM", "PRDT_NM_CONT", "PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM"]
+        """데이터에서 실제 정보를 추출하고 검증"""
+        fields = ["PRDT_NM", "PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM", "PRDLST_NM"]
         for f in fields:
-            match = re.search(rf'{f}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
+            match = re.search(rf'{field}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE) if 'field' not in locals() else re.search(rf'{f}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
             if match:
                 raw = self._clean_val(match.group(1))
                 if not self._is_garbage(raw):
-                    power_match = re.search(r'([+-]?\d+\.\d{2})', raw)
-                    power = power_match.group(1) if power_match else "N/A"
+                    p_match = re.search(r'([+-]?\d+\.\d{2})', raw)
+                    power = p_match.group(1) if p_match else "N/A"
                     name = raw.replace(power, "").strip("- ").strip()
                     if not self._is_garbage(name):
                         return {"name": name, "power": power, "field": f}
         return None
 
+    def _try_request(self, service: str, endpoint: str, param: str, val: str) -> Optional[str]:
+        """상세 로그를 남기며 API를 호출합니다."""
+        url = f"{self.base_url}/{service}/{endpoint}"
+        # 상세 조회용 주소 (pageNo 제외)
+        full_url = f"{url}?serviceKey={self.api_key}&type=json&{param}={val}"
+        
+        print(f"  🔎 조회: {endpoint} ({param}={val})")
+        try:
+            response = requests.get(full_url, timeout=6)
+            if response.status_code == 200:
+                if '"totalCount":0' in response.text or '<totalCount>0' in response.text:
+                    return None
+                return response.text
+            elif response.status_code == 500:
+                print(f"    ⚠️ {endpoint}: 500 에러 (파라미터 '{param}' 불일치 가능성)")
+        except Exception: pass
+        return None
+
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
         if not identifier: return None
         target_id = identifier.zfill(14)
-        print(f"\n--- 🛰️ [진단 시작] UDI 정밀 추적 ({target_id}) ---")
+        print(f"\n--- 🛰️ [최종 추적] 렌즈 정보 정밀 검색 시작 ({target_id}) ---")
 
-        # --- [STEP 1] MsUdediInfoService (목록 조회) ---
-        print(f"\n📍 [체크포인트 1: 목록 조회 (getUdediList)]")
-        list_url = f"{self.base_url}/MsUdediInfoService/getUdediList"
-        # 목록 조회는 pageNo 필수
-        list_full = f"{list_url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&UDIDI_CD={target_id}"
-        
-        udidi_from_list = None
-        try:
-            res = requests.get(list_full, timeout=7)
-            if res.status_code == 200 and '"totalCount":0' not in res.text:
-                match = re.search(r'UDIDI_CD["\>\]\s:]+([^"<\n]+)', res.text, re.IGNORECASE)
-                if match:
-                    udidi_from_list = self._clean_val(match.group(1))
-                    print(f"  ✅ 성공: 식별자({udidi_from_list}) 확보 완료")
-            else:
-                print(f"  ❌ 결과: 목록에 정보가 없습니다.")
-        except Exception as e:
-            print(f"  ⚠️ 오류: 목록 조회 접속 실패 ({str(e)})")
+        # 시도할 모든 경로와 파라미터 조합 (가장 확률 높은 순)
+        # MsUdedi(신규)와 Mdeq(기존)를 모두 포함
+        tasks = [
+            ("MsUdediInfoService", "getUdediInfo", "UDIDI_CD"),
+            ("MsUdediInfoService", "getUdediInfo", "udi"),
+            ("MsUdediInfoService", "getUdediInfo", "udi_di"),
+            ("MdeqStdCdUnityInfoService01", "getMdeqStdCdUnityInfoInq01", "UDIDI_CD"),
+            ("MdeqStdCdUnityInfoService01", "getMdeqStdCdUnityInfoInq01", "udi_code"),
+            ("MdeqStdCdUnityInfoService01", "getMdeqStdCdInq01", "gtin_code")
+        ]
 
-        # --- [STEP 2] MsUdediInfoService (상세 조회) ---
-        # 식별자를 찾았거나, 못 찾았더라도 원본 ID로 상세 조회 시도
-        final_di = udidi_from_list if udidi_from_list else target_id
-        print(f"\n📍 [체크포인트 2: 상세 정보 조회 (getUdediInfo)]")
-        info_url = f"{self.base_url}/MsUdediInfoService/getUdediInfo"
-        # 상세 조회는 pageNo 제외 (500 에러 방지)
-        info_full = f"{info_url}?serviceKey={self.api_key}&type=json&UDIDI_CD={final_di}"
-        
-        try:
-            res_i = requests.get(info_full, timeout=7)
-            if res_i.status_code == 200 and '"totalCount":0' not in res_i.text:
-                info = self._extract_info(res_i.text)
-                if info:
-                    print(f"  ✅ 성공: {info['name']} ({info['power']})")
-                    return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 정식 등록", 'gtin': final_di}
-            print(f"  ❌ 결과: 상세 정보가 비어있습니다.")
-        except Exception:
-            print(f"  ⚠️ 오류: 상세 조회 접속 실패")
+        # 병렬로 모든 가능성을 동시에 찔러봅니다.
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            future_to_task = {executor.submit(self._try_request, *task, target_id): task for task in tasks}
+            
+            for future in as_completed(future_to_task):
+                content = future.result()
+                if content:
+                    info = self._extract_info(content)
+                    if info:
+                        print(f"\n✅ 성공: {info['name']} ({info['power']})")
+                        print(f"--- 🛰️ 추적 종료 ---\n")
+                        return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 등록 제품", 'gtin': target_id}
 
-        # --- [STEP 3] MdeqStdCdUnityInfoService01 (최종 폴백) ---
-        print(f"\n📍 [체크포인트 3: 통합정보망 최종 확인]")
-        u_url = f"{self.base_url}/MdeqStdCdUnityInfoService01/getMdeqStdCdUnityInfoInq01"
-        u_full = f"{u_url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&UDIDI_CD={target_id}"
-        
-        try:
-            res_u = requests.get(u_full, timeout=7)
-            if res_u.status_code == 200 and '"totalCount":0' not in res_u.text:
-                info = self._extract_info(res_u.text)
-                if info:
-                    print(f"  ✅ 성공: {info['name']} ({info['power']})")
-                    return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 통합 등록", 'gtin': target_id}
-        except Exception: pass
-
-        print("\n❌ [최종 실패] 모든 경로에 유효한 데이터가 없습니다.")
-        print(f"--- 🛰️ [진단 종료] ---\n")
+        print("\n❌ 모든 경로와 파라미터로 시도했으나 유효한 데이터를 찾지 못했습니다.")
+        print(f"--- 🛰️ 추적 종료 ---\n")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
