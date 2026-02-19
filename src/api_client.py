@@ -9,12 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """병렬 요청을 통해 파싱 속도를 극대화한 클라이언트"""
+    """기존 서비스와 새로운 UDI/EDI 서비스를 통합하여 검색하는 병렬 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
-        base = os.getenv("LENS_API_BASE_URL", "").split('/Mdeq')[0]
-        self.service_url = f"{base}/MdeqStdCdUnityInfoService01"
+        # 공공데이터포털 기본 베이스 주소
+        self.base_url = "https://apis.data.go.kr/1471000"
+        
+        # 통합 검색할 서비스 및 엔드포인트 목록
+        self.search_configs = [
+            # 1. 의료기기 표준코드 통합정보 서비스 (기존)
+            {"service": "MdeqStdCdUnityInfoService01", "endpoints": ["getMdeqStdCdUnityInfoInq01", "getMdeqStdCdInq01"]},
+            # 2. 의료기기 UDI/EDI 정보 조회 서비스 (신규)
+            {"service": "MdvUdiInfoService", "endpoints": ["getMdvUdiInfoInq01"]}
+        ]
 
     def _is_garbage_name(self, name: str) -> bool:
         if not name: return True
@@ -25,23 +33,36 @@ class APIClient:
         return any(kw in lower_name for kw in garbage_keywords) or not re.search(r'[a-zA-Z가-힣0-9]', clean_name)
 
     def _extract_from_raw(self, content: str) -> Optional[Dict[str, str]]:
-        match = re.search(r'PRDT_ADD_EXPL["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
-        model_match = re.search(r'MODEL_NM["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
-        raw_text = (match.group(1) if match else (model_match.group(1) if model_match else "")).strip()
+        """텍스트 뭉치에서 제품명과 도수를 추출합니다."""
+        # 1. PRDT_ADD_EXPL(상세설명), MODEL_NM(모델명), ITEM_NM(품목명) 순서로 검색
+        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM", "MDEQ_PRDLST_NM"]
+        raw_text = None
         
-        if not raw_text or self._is_garbage_name(raw_text):
-            return None
+        for field in fields:
+            match = re.search(rf'{field}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
+            if match:
+                val = match.group(1).strip()
+                if not self._is_garbage_name(val):
+                    raw_text = val
+                    break
+        
+        if not raw_text: return None
 
+        # 도수 추출 (-7.00, +1.50 등)
         power_match = re.search(r'([+-]?\d+\.\d{2})', raw_text)
         power = power_match.group(1) if power_match else "N/A"
-        name = text = raw_text.replace(power, "")
+        
+        # 이름 정리
+        name = raw_text.replace(power, "")
         name = re.sub(r'\(.*?\)', '', name).strip("- ").strip()
         
         return {"name": name, "power": power} if not self._is_garbage_name(name) else None
 
-    def _make_request(self, url: str, p_name: str, target_id: str) -> Optional[Dict]:
-        """단일 API 요청을 수행하는 워커 함수"""
+    def _make_request(self, service: str, endpoint: str, p_name: str, target_id: str) -> Optional[Dict]:
+        """개별 API 요청 워커"""
+        url = f"{self.base_url}/{service}/{endpoint}"
         full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{p_name}={target_id}"
+        
         try:
             response = requests.get(full_url, timeout=5)
             if response.status_code == 200:
@@ -54,40 +75,39 @@ class APIClient:
                     return {
                         'name': info['name'],
                         'power': info['power'],
-                        'manufacturer': "정부 DB 등록 제품",
-                        'gtin': target_id
+                        'manufacturer': "식약처 등록 제품",
+                        'gtin': target_id,
+                        'source_service': service
                     }
         except Exception:
             pass
         return None
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """모든 서랍을 병렬로 동시에 뒤져서 가장 빨리 찾은 결과를 반환합니다."""
+        """모든 식약처 서비스를 동시에 뒤져서 정보를 가져옵니다."""
         if not identifier: return None
         
         target_ids = list(set([identifier.zfill(14), identifier[-13:], identifier]))
-        endpoints = [f"{self.service_url}/getMdeqStdCdUnityInfoInq01", f"{self.service_url}/getMdeqStdCdInq01"]
         params = ["UDIDI_CD", "udi_code", "gtin_code"]
 
-        # 실행할 모든 작업 조합 생성
         tasks = []
-        for endpoint in endpoints:
-            for tid in target_ids:
-                for p in params:
-                    tasks.append((endpoint, p, tid))
+        for config in self.search_configs:
+            for endpoint in config["endpoints"]:
+                for tid in target_ids:
+                    for p in params:
+                        tasks.append((config["service"], endpoint, p, tid))
 
-        # 병렬 실행 (최대 10개의 스레드 동시 가동)
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        # 병렬 실행 (최대 15개 스레드)
+        with ThreadPoolExecutor(max_workers=15) as executor:
             future_to_task = {executor.submit(self._make_request, *task): task for task in tasks}
             
             for future in as_completed(future_to_task):
                 result = future.result()
                 if result:
-                    # 유효한 결과를 찾으면 즉시 반환 (나머지 스레드 결과는 무시됨)
-                    print(f"⚡ 병렬 검색 성공: {result['name']}")
+                    print(f"⚡ [{result['source_service']}] 검색 성공: {result['name']}")
                     return result
 
-        print("📭 모든 경로를 동시에 탐색했으나 정보를 찾지 못했습니다.")
+        print("📭 모든 식약처 서비스를 조회했으나 유효한 정보를 찾지 못했습니다.")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
