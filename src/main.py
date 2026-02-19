@@ -27,26 +27,21 @@ def main():
                 ui.show_message("바코드를 인식할 수 없습니다.", "error")
                 continue
 
+            # [핵심] GS1 표준에 맞게 바코드 파싱
             parsed_data = parser.process_scanner_input(raw_barcode)
             
-            search_id = parsed_data.get('gtin') or raw_barcode
+            # [핵심] 추출된 GTIN(UDI-DI)으로 정석 2단계 조회 시작
+            search_id = parsed_data.get('gtin')
             if search_id:
                 api_data = api.fetch_product_info(search_id)
                 if api_data:
                     parsed_data = api.sync_with_local_db(api_data, parsed_data)
             
-            # [수정된 방어 로직] 
-            name_val = str(parsed_data.get('name', '')).strip()
-            # 빈 문자열("")은 리스트에서 빼고 별도로 체크합니다.
-            garbage = ["null", "none", "nan", "평가되지", "undefined", "미등록"]
-            
-            # 이름이 아예 없거나, 금지 단어가 포함된 경우만 부적격 처리
-            is_invalid = not name_val or any(g in name_val.lower() for g in garbage)
-            
-            if is_invalid:
-                ui.show_message("유효한 제품명을 찾을 수 없습니다. (정부 DB 미등록 또는 정보 부실)", "warning")
-                manual_name = ui.get_input("제품명 직접 입력")
-                parsed_data['name'] = manual_name if manual_name else "미지정 제품"
+            # 최종 검증 및 수동 입력
+            if not parsed_data.get('name'):
+                ui.show_message("정부 DB에서 제품 정보를 찾을 수 없습니다.", "warning")
+                parsed_data['name'] = ui.get_input("제품명 직접 입력")
+                if not parsed_data['name']: parsed_data['name'] = "미지정 제품"
 
             if db.upsert_product(parsed_data):
                 ui.show_message(f"성공적으로 등록되었습니다: {parsed_data['name']}", "success")

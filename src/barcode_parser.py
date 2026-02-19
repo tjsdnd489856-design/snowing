@@ -6,49 +6,66 @@ import calendar
 from typing import Dict, Optional, Any
 
 class BarcodeParser:
-    """UDI/GS1 바코드뿐만 아니라 일반 숫자 바코드도 인식하는 파서"""
+    """GS1-128 표준 가이드를 준수하는 정밀 바코드 파서"""
 
     @staticmethod
     def parse_gs1_128(raw_data: str) -> Dict[str, Any]:
-        """GS1-128 또는 UDI 문자열 파싱 (유연한 숫자 인식 포함)"""
-        clean_data = raw_data.replace('(', '').replace(')', '')
-        # 기본 결과 셋 (숫자만 들어온 경우 gtin으로 우선 간주)
-        result = {'udi': raw_data, 'gtin': '', 'expire_date': '9999-12-31', 'lot': 'N/A', 'manufacture_date': '', 'power': 'N/A', 'name': ''}
-
-        # 만약 입력이 순수 숫자(13~14자리)라면 GTIN으로 바로 할당
-        if raw_data.isdigit() and len(raw_data) in [13, 14]:
-            result['gtin'] = raw_data
-            return result
-
-        patterns = {
-            'gtin': r'01(\d{14})',
-            'expire_date': r'17(\d{6})',
-            'lot': r'10([a-zA-Z0-9]{1,20})',
-            'manufacture_date': r'11(\d{6})',
+        """AI(Application Identifier)를 분석하여 데이터를 정확히 분리합니다."""
+        # 불필요한 괄호나 공백 제거
+        clean = raw_data.replace('(', '').replace(')', '').strip()
+        
+        # 결과 기본값
+        result = {
+            'udi': raw_data,
+            'gtin': '',
+            'expire_date': '9999-12-31',
+            'lot': 'N/A',
+            'power': 'N/A',
+            'name': ''
         }
 
-        for key, pattern in patterns.items():
-            match = re.search(pattern, clean_data)
+        # 1. GTIN (AI: 01) 추출 - 고정 14자리
+        if clean.startswith('01'):
+            result['gtin'] = clean[2:16]
+            remaining = clean[16:]
+        elif len(clean) == 13 or len(clean) == 14:
+            # 숫자만 들어온 경우
+            result['gtin'] = clean.zfill(14)
+            remaining = ""
+        else:
+            # 01이 중간에 있는 경우 검색
+            match = re.search(r'01(\d{14})', clean)
             if match:
-                val = match.group(1)
-                if key in ['expire_date', 'manufacture_date']:
-                    try:
-                        year = int(val[0:2]) + 2000
-                        month = int(val[2:4])
-                        day = int(val[4:6])
-                        if day == 0:
-                            if month == 0: month = 1
-                            day = calendar.monthrange(year, month)[1]
-                        val = f"{year}-{month:02d}-{day:02d}"
-                    except Exception:
-                        val = "9999-12-31"
-                result[key] = val
-        
-        # 정규표현식으로 gtin을 못 찾았는데 숫자만 있는 경우 재확인
-        if not result['gtin']:
-            digits = re.findall(r'\d{13,14}', clean_data)
-            if digits: result['gtin'] = digits[0]
-            
+                result['gtin'] = match.group(1)
+                remaining = clean.replace(f"01{result['gtin']}", "")
+            else:
+                result['gtin'] = clean[:14].zfill(14)
+                remaining = clean[14:]
+
+        # 2. 유통기한 (AI: 17) 추출 - 고정 6자리 (YYMMDD)
+        exp_match = re.search(r'17(\d{6})', remaining)
+        if exp_match:
+            val = exp_match.group(1)
+            try:
+                year = int(val[0:2]) + 2000
+                month = int(val[2:4])
+                day = int(val[4:6])
+                # 일자가 00인 경우 해당 월의 말일로 보정
+                if day == 0:
+                    day = calendar.monthrange(year, month)[1]
+                result['expire_date'] = f"{year}-{month:02d}-{day:02d}"
+            except Exception:
+                pass
+
+        # 3. 로트 번호 (AI: 10) 추출 - 가변 길이
+        lot_match = re.search(r'10([a-zA-Z0-9]+)', remaining)
+        if lot_match:
+            # 다른 AI(예: 17, 21)가 시작되기 전까지만 로트로 인정
+            lot_val = lot_match.group(1)
+            # 보통 17이나 21이 뒤에 붙으므로 이를 잘라냄
+            lot_val = re.split(r'(17|21|11)', lot_val)[0]
+            result['lot'] = lot_val
+
         return result
 
     def read_from_image(self, image_path: str, retries: int = 3) -> Optional[str]:
