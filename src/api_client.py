@@ -8,65 +8,84 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """식약처 UDI 데이터베이스 정밀 분석 클라이언트"""
+    """정부 DB의 모든 서랍을 뒤져서 렌즈 정보를 찾아내는 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
-        self.base_url = os.getenv("LENS_API_BASE_URL", "").rstrip('/')
+        # 기본 주소에서 서비스 명칭까지만 추출
+        base = os.getenv("LENS_API_BASE_URL", "").split('/Mdeq')[0]
+        self.service_url = f"{base}/MdeqStdCdUnityInfoService01"
 
     def _clean_text(self, text: str) -> Dict[str, str]:
-        """텍스트에서 제품명과 도수를 분리 (예: PURSFIT 1DAY AIRCLEAR(10P) -7.00)"""
-        # 1. 도수 추출 (예: -7.00)
+        """텍스트에서 제품명과 도수를 분리"""
         power_match = re.search(r'([+-]?\d+\.\d{2})', text)
         power = power_match.group(1) if power_match else "N/A"
-        
-        # 2. 제품명 추출 및 정리
-        name = text.replace(power, "").replace("(10P)", "").replace("(30P)", "")
-        name = re.sub(r'\(.*?\)', '', name) # 괄호 내용 제거
-        name = name.strip("- ").strip()
-        
+        name = text.replace(power, "")
+        name = re.sub(r'\(.*?\)', '', name).strip("- ").strip()
         return {"name": name, "power": power}
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """UDIDI_CD 필드를 사용하여 정확한 제품 정보를 가져옵니다."""
+        """결과가 0개라도 다른 엔드포인트를 순환하며 끝까지 찾습니다."""
         if not identifier: return None
         
-        # 바코드에서 추출한 14자리 GTIN/UDI-DI
-        target_udi = identifier.zfill(14)
-        url = f"{self.base_url}/getMdeqStdCdUnityInfoInq01"
-        
-        # 정부 DB의 실제 필드명인 UDIDI_CD와 udi_code 등을 교차 시도
-        for param_name in ["UDIDI_CD", "udidi_cd", "udi_code", "gtin_code"]:
-            full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{param_name}={target_udi}"
-            
-            try:
-                print(f"🔍 검색 시도 중: {param_name}={target_udi}")
-                response = requests.get(full_url, timeout=10)
+        # 14자리 GTIN 추출 (바코드의 핵심 식별 번호)
+        target_id = identifier.zfill(14)
+        if len(identifier) > 14: # GS1-128인 경우 앞의 01 뒤 14자리 추출
+            match = re.search(r'01(\d{14})', identifier)
+            if match: target_id = match.group(1)
+
+        # 뒤져볼 서랍(엔드포인트) 목록
+        endpoints = ["getMdeqStdCdUnityInfoInq01", "getMdeqStdCdInq01"]
+        # 시도할 파라미터 목록
+        params_to_try = ["UDIDI_CD", "udi_code", "gtin_code"]
+
+        for endpoint in endpoints:
+            url = f"{self.service_url}/{endpoint}"
+            for p_name in params_to_try:
+                full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{p_name}={target_id}"
                 
-                if response.status_code == 200:
-                    content = response.text
-                    
-                    # 검색 결과가 우리가 찾는 UDI와 일c치하는지 확인
-                    if target_udi in content:
-                        # PRDT_ADD_EXPL 필드에서 알맹이 추출 (JSON/XML 공통)
-                        match = re.search(r'PRDT_ADD_EXPL[^\>]*\>([^<]+)\<', content) # XML 형태
-                        if not match:
-                            match = re.search(r'"PRDT_ADD_EXPL"\s*:\s*"([^"]+)"', content) # JSON 형태
+                try:
+                    print(f"🔎 {endpoint} 서랍 뒤지는 중... ({target_id})")
+                    response = requests.get(full_url, timeout=10)
+                    if response.status_code == 200:
+                        content = response.text
                         
+                        # 결과가 있는지 확인 (totalCount가 0이 아니어야 함)
+                        count_match = re.search(r'<totalCount>([^<]+)</totalCount>', content)
+                        if count_match and count_match.group(1) == '0':
+                            continue # 다음 파라미터나 서랍으로 이동
+
+                        # 정보 추출 (PRDT_ADD_EXPL 또는 MODEL_NM)
+                        res_text = None
+                        # 1순위: 상세 설명 필드
+                        match = re.search(r'PRDT_ADD_EXPL[^\>]*\>([^<]+)\<', content)
                         if match:
-                            raw_text = match.group(1)
-                            print(f"✅ 데이터 발견: {raw_text}")
-                            info = self._clean_text(raw_text)
+                            res_text = match.group(1)
+                            info = self._clean_text(res_text)
+                            print(f"✅ 상세 정보 발견: {res_text}")
                             return {
                                 'name': info['name'],
                                 'power': info['power'],
                                 'manufacturer': "정부 DB 등록 제품",
-                                'gtin': target_udi
+                                'gtin': target_id
+                            }
+                        
+                        # 2순위: 모델명 필드
+                        model_match = re.search(r'MODEL_NM[^\>]*\>([^<]+)\<', content)
+                        if model_match:
+                            model_nm = model_match.group(1)
+                            print(f"✅ 모델명 발견: {model_nm}")
+                            return {
+                                'name': model_nm,
+                                'power': "N/A",
+                                'manufacturer': "정부 DB 등록 제품",
+                                'gtin': target_id
                             }
                 
-            except Exception as e:
-                print(f"❌ 연결 오류: {e}")
+                except Exception as e:
+                    print(f"❌ 접속 오류: {e}")
         
+        print("📭 모든 서랍을 뒤졌으나 정보를 찾지 못했습니다.")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
