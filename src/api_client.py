@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """공공데이터포털 의료기기 전용 정밀 파싱 클라이언트"""
+    """모든 필드명을 자동 검색하는 초정밀 API 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
@@ -21,7 +21,7 @@ class APIClient:
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """정부 DB의 복잡한 계층 구조를 뚫고 실제 제품명과 도수를 가져옵니다."""
+        """정부 응답의 모든 필드를 뒤져서 이름과 도수를 찾아냅니다."""
         if not identifier: return None
         
         gtin = identifier.zfill(14)
@@ -29,24 +29,16 @@ class APIClient:
         url = self.base_url.rstrip('/') + '/' + endpoint
 
         for param_name in ["gtin_code", "udi_code"]:
-            params = {
-                "serviceKey": self.api_key,
-                "type": "json",
-                "pageNo": "1",
-                "numOfRows": "1",
-                param_name: gtin
-            }
+            params = {"serviceKey": self.api_key, "type": "json", "pageNo": "1", "numOfRows": "1", param_name: gtin}
 
             try:
                 response = requests.get(url, params=params, timeout=15)
                 if response.status_code == 200:
                     result = response.json()
                     body = result.get('body', {})
-                    
-                    # 공공데이터 특유의 구조: body -> items -> item (리스트 또는 단일 객체)
                     items_wrapper = body.get('items')
-                    item_list = []
                     
+                    item_list = []
                     if isinstance(items_wrapper, dict):
                         item_data = items_wrapper.get('item', [])
                         item_list = item_data if isinstance(item_data, list) else [item_data]
@@ -56,22 +48,35 @@ class APIClient:
                     if item_list and len(item_list) > 0:
                         item = item_list[0]
                         
-                        # 모든 가능한 필드명 대조 (대소문자 및 오타 대비)
-                        model = item.get('MODEL_NM') or item.get('modelNm') or ""
-                        prdlst = item.get('PRDLST_NM') or item.get('mdeqPrdlstNm') or item.get('MDEQ_PRDLST_NM') or ""
-                        spec = item.get('SPEC_NM') or item.get('specNm') or "N/A"
-                        entp = item.get('ENTP_NM') or item.get('entpNm') or "N/A"
+                        # 모든 필드명을 대문자로 통일하여 검색 (변종 대응)
+                        raw = {str(k).upper(): v for k, v in item.items()}
                         
-                        # 브랜드명이 있으면 브랜드명 우선, 없으면 품목명 사용
-                        name = f"[{model}] {prdlst}".strip() if model and prdlst else (model or prdlst or "이름 없는 제품")
+                        # 1. 제품명 찾기 (가능한 모든 후보군)
+                        model = raw.get('MODEL_NM') or raw.get('MODELNM') or raw.get('ITEM_NM') or raw.get('PRD_NM') or ""
+                        prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or raw.get('MDEQPRDLSTNM') or ""
+                        entp = raw.get('ENTP_NM') or raw.get('ENTPNM') or ""
                         
-                        self.logger.info(f"성공: {name} / {spec}")
+                        # 2. 도수/규격 찾기
+                        spec = raw.get('SPEC_NM') or raw.get('SPECNM') or raw.get('SPEC') or "N/A"
                         
+                        # 이름 조립
+                        name = ""
+                        if model and prdlst: name = f"[{model}] {prdlst}"
+                        elif model: name = model
+                        elif prdlst: name = prdlst
+                        else: name = "이름 정보 없음"
+
+                        self.logger.info(f"데이터 추출 성공: {name} ({spec})")
+                        
+                        # 만약 여전히 이름이 없으면 필드 목록을 출력하여 디버깅 도움
+                        if name == "이름 정보 없음":
+                            self.logger.warning(f"사용 가능한 필드들: {list(raw.keys())}")
+
                         return {
-                            'name': name,
-                            'power': spec,
-                            'manufacturer': entp,
-                            'gtin': item.get('GTIN_CODE') or gtin
+                            'name': str(name).strip(),
+                            'power': str(spec).strip(),
+                            'manufacturer': str(entp).strip(),
+                            'gtin': raw.get('GTIN_CODE') or gtin
                         }
             except Exception as e:
                 self.logger.error(f"접속 오류: {e}")
