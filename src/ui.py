@@ -13,16 +13,11 @@ class LensUI:
     def display_menu(self):
         """메인 메뉴 표시"""
         menu_text = (
-            "[bold cyan]1.[/bold cyan] 바코드 스캔 (USB/이미지)
-"
-            "[bold cyan]2.[/bold cyan] 전체 제품 목록 조회
-"
-            "[bold cyan]3.[/bold cyan] 만료 및 임박 제품 확인
-"
-            "[bold cyan]4.[/bold cyan] 제품 검색
-"
-            "[bold cyan]5.[/bold cyan] 제품 삭제
-"
+            "[bold cyan]1.[/bold cyan] 바코드 스캔 (USB/이미지)\n"
+            "[bold cyan]2.[/bold cyan] 전체 제품 목록 조회\n"
+            "[bold cyan]3.[/bold cyan] 만료 및 임박 제품 확인\n"
+            "[bold cyan]4.[/bold cyan] 제품 검색\n"
+            "[bold cyan]5.[/bold cyan] 제품 삭제\n"
             "[bold cyan]0.[/bold cyan] 종료"
         )
         self.console.print(Panel(menu_text, title="콘택트렌즈 관리 시스템", subtitle="v1.0"))
