@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """모든 상세 서랍을 순차적으로 뒤져서 문제 지점을 찾아내는 정밀 진단 클라이언트"""
+    """MsUdedi 2단계 공정을 최우선으로 하되 모든 서랍을 뒤지는 정밀 진단 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
@@ -21,11 +21,12 @@ class APIClient:
 
     def _clean_val(self, val: Any) -> str:
         if not val: return ""
+        # 쉼표, 따옴표 등 모든 불순물 제거 후 순수 텍스트만 추출
         return str(val).strip().replace('"', '').replace('}', '').replace(',', '').replace(';', '')
 
     def _extract_info(self, content: str) -> Optional[Dict[str, str]]:
-        """데이터 뭉치에서 제품명과 도수를 추출"""
-        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "PRDT_NM", "ITEM_NM", "PRDLST_NM"]
+        """데이터 뭉치에서 제품명과 도수 추출"""
+        fields = ["PRDT_NM", "PRDT_NM_CONT", "PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM"]
         for f in fields:
             match = re.search(rf'{f}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
             if match:
@@ -39,63 +40,63 @@ class APIClient:
         return None
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """[체크포인트 1~4]를 거치며 어느 서랍에 정보가 있는지 추적합니다."""
         if not identifier: return None
         target_id = identifier.zfill(14)
-        print(f"\n--- 🛰️ [진단 시작] 렌즈 정보 정밀 추적 ({target_id}) ---")
+        print(f"\n--- 🛰️ [진단 시작] UDI 정밀 추적 ({target_id}) ---")
 
-        # 1. 존재 확인 (Mdeq)
-        print(f"\n📍 [체크포인트 1: 통합 DB 존재 여부 확인]")
+        # --- [STEP 1] MsUdediInfoService (목록 조회) ---
+        print(f"\n📍 [체크포인트 1: 목록 조회 (getUdediList)]")
+        list_url = f"{self.base_url}/MsUdediInfoService/getUdediList"
+        # 목록 조회는 pageNo 필수
+        list_full = f"{list_url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&UDIDI_CD={target_id}"
+        
+        udidi_from_list = None
+        try:
+            res = requests.get(list_full, timeout=7)
+            if res.status_code == 200 and '"totalCount":0' not in res.text:
+                match = re.search(r'UDIDI_CD["\>\]\s:]+([^"<\n]+)', res.text, re.IGNORECASE)
+                if match:
+                    udidi_from_list = self._clean_val(match.group(1))
+                    print(f"  ✅ 성공: 식별자({udidi_from_list}) 확보 완료")
+            else:
+                print(f"  ❌ 결과: 목록에 정보가 없습니다.")
+        except Exception as e:
+            print(f"  ⚠️ 오류: 목록 조회 접속 실패 ({str(e)})")
+
+        # --- [STEP 2] MsUdediInfoService (상세 조회) ---
+        # 식별자를 찾았거나, 못 찾았더라도 원본 ID로 상세 조회 시도
+        final_di = udidi_from_list if udidi_from_list else target_id
+        print(f"\n📍 [체크포인트 2: 상세 정보 조회 (getUdediInfo)]")
+        info_url = f"{self.base_url}/MsUdediInfoService/getUdediInfo"
+        # 상세 조회는 pageNo 제외 (500 에러 방지)
+        info_full = f"{info_url}?serviceKey={self.api_key}&type=json&UDIDI_CD={final_di}"
+        
+        try:
+            res_i = requests.get(info_full, timeout=7)
+            if res_i.status_code == 200 and '"totalCount":0' not in res_i.text:
+                info = self._extract_info(res_i.text)
+                if info:
+                    print(f"  ✅ 성공: {info['name']} ({info['power']})")
+                    return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 정식 등록", 'gtin': final_di}
+            print(f"  ❌ 결과: 상세 정보가 비어있습니다.")
+        except Exception:
+            print(f"  ⚠️ 오류: 상세 조회 접속 실패")
+
+        # --- [STEP 3] MdeqStdCdUnityInfoService01 (최종 폴백) ---
+        print(f"\n📍 [체크포인트 3: 통합정보망 최종 확인]")
         u_url = f"{self.base_url}/MdeqStdCdUnityInfoService01/getMdeqStdCdUnityInfoInq01"
         u_full = f"{u_url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&UDIDI_CD={target_id}"
         
         try:
-            res = requests.get(u_full, timeout=7)
-            if res.status_code == 200 and ('"totalCount":0' not in res.text and '<totalCount>0' not in res.text):
-                print(f"  ✅ 확인: 통합 DB에 등록된 제품입니다. 상세 조회를 시작합니다.")
-            else:
-                print(f"  ❌ 확인: 통합 DB에 정보가 없습니다. (미등록 번호일 가능성)")
-        except Exception as e:
-            print(f"  ⚠️ 오류: 통합 DB 접속 실패 ({str(e)})")
+            res_u = requests.get(u_full, timeout=7)
+            if res_u.status_code == 200 and '"totalCount":0' not in res_u.text:
+                info = self._extract_info(res_u.text)
+                if info:
+                    print(f"  ✅ 성공: {info['name']} ({info['power']})")
+                    return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 통합 등록", 'gtin': target_id}
+        except Exception: pass
 
-        # 2. 상세 서랍 탐색 목록
-        drawers = [
-            {"name": "최신 UDI/EDI 서랍 (MsUdedi)", "svc": "MsUdediInfoService", "end": "getUdediInfo"},
-            {"name": "통합 상세 서랍 (Mdeq)", "svc": "MdeqStdCdUnityInfoService01", "end": "getMdeqStdCdUnityInfoInq01"},
-            {"name": "기본 표준코드 서랍 (Mdeq)", "svc": "MdeqStdCdUnityInfoService01", "end": "getMdeqStdCdInq01"},
-            {"name": "구형 UDI 서랍 (Mdv)", "svc": "MdvUdiInfoService", "end": "getMdvUdiInfoInq01"}
-        ]
-
-        print(f"\n📍 [체크포인트 2: 모든 상세 서랍 순차 탐색]")
-        for dr in drawers:
-            url = f"{self.base_url}/{dr['svc']}/{dr['end']}"
-            full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&UDIDI_CD={target_id}"
-            
-            print(f"  🔎 {dr['name']} 여는 중...")
-            try:
-                response = requests.get(full_url, timeout=7)
-                if response.status_code == 200:
-                    content = response.text
-                    if '"totalCount":0' in content or '<totalCount>0' in content:
-                        print(f"    📭 결과: 이 서랍은 비어있습니다.")
-                        continue
-                    
-                    # 3. 알맹이 추출 및 검증
-                    info = self._extract_info(content)
-                    if info:
-                        print(f"    ✅ 성공: '{info['field']}' 필드에서 정보를 찾았습니다!")
-                        print(f"\n🎉 [진단 완료] 정보 획득 성공!")
-                        print(f"  📦 제품명: {info['name']}")
-                        print(f"  💎 도수: {info['power']}")
-                        return {'name': info['name'], 'power': info['power'], 'manufacturer': "식약처 등록 제품", 'gtin': target_id}
-                    else:
-                        print(f"    ⚠️ 경고: 데이터는 있으나 유효한 이름이 없습니다. (null 등)")
-                else:
-                    print(f"    ❌ 에러: 서버 응답 오류 ({response.status_code})")
-            except Exception as e:
-                print(f"    ❌ 오류: 접속 실패 ({str(e)})")
-
-        print("\n❌ [최종 실패] 모든 서랍을 뒤졌으나 유효한 제품명을 찾지 못했습니다.")
+        print("\n❌ [최종 실패] 모든 경로에 유효한 데이터가 없습니다.")
         print(f"--- 🛰️ [진단 종료] ---\n")
         return None
 
