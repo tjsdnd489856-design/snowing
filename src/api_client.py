@@ -4,6 +4,7 @@ import requests
 import logging
 import urllib.parse
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
 from dotenv import load_dotenv
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """정부 API 응답에서 PRDT_ADD_EXPL 필드를 정밀 분석하는 클라이언트"""
+    """JSON과 XML 응답을 모두 처리하는 통합 정부 API 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
@@ -20,68 +21,78 @@ class APIClient:
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
-    def _extract_info(self, text: str) -> Dict[str, str]:
-        """텍스트에서 제품명과 도수를 분리합니다. (예: PURSFIT 1DAY AIRCLEAR(10P) -7.00)"""
-        # 1. 도수 찾기 (예: -7.00, +2.50 등)
+    def _extract_from_text(self, text: str) -> Dict[str, str]:
+        """텍스트에서 제품명과 도수를 추출 (예: PURSFIT 1DAY AIRCLEAR(10P) -7.00)"""
+        if not text: return {"name": "알 수 없는 제품", "power": "N/A"}
+        
+        # 도수 패턴 추출 (-7.00, +1.50 등)
         power_match = re.search(r'([+-]?\d+\.\d{2})', text)
         power = power_match.group(1) if power_match else "N/A"
         
-        # 2. 제품명 정리 (도수 부분과 불필요한 괄호 제거)
-        name = text
-        if power != "N/A":
-            name = name.replace(power, "")
-        
-        # (10P), (30P) 같은 수량 정보나 특수문자 정리
-        name = re.sub(r'\(\d+P\)', '', name)
+        # 제품명 정리
+        name = text.replace(power, "") if power != "N/A" else text
+        name = re.sub(r'\(\d+P\)', '', name) # 수량 제거
         name = name.strip("- ").strip()
         
         return {"name": name, "power": power}
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """PRDT_ADD_EXPL 필드를 분석하여 제품명과 도수를 완벽히 가져옵니다."""
+        """JSON/XML 응답을 모두 분석하여 PRDT_ADD_EXPL 필드를 찾아냅니다."""
         if not identifier: return None
-        
         gtin = identifier.zfill(14)
-        # 확인된 정확한 엔드포인트
         url = f"{self.base_url}/getMdeqStdCdUnityInfoInq01"
         
         for param in ["udi_code", "gtin_code", "udi_di"]:
+            # 인증키 보호를 위해 직접 조립
             full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{param}={gtin}"
+            
             try:
                 response = requests.get(full_url, timeout=10)
                 if response.status_code == 200:
-                    res_data = response.json()
-                    
-                    # 모든 필드를 평면화하여 검색
-                    def walk(obj):
-                        if isinstance(obj, dict):
-                            # 우리가 찾은 핵심 필드 확인
-                            if 'PRDT_ADD_EXPL' in obj and obj['PRDT_ADD_EXPL']:
-                                return obj['PRDT_ADD_EXPL']
-                            for v in obj.values():
-                                res = walk(v)
-                                if res: return res
-                        elif isinstance(obj, list):
-                            for i in obj:
-                                res = walk(i)
-                                if res: return res
-                        return None
+                    content = response.text.strip()
+                    raw_info_text = None
 
-                    raw_text = walk(res_data)
-                    
-                    if raw_text:
-                        self.logger.info(f"데이터 발견: {raw_text}")
-                        extracted = self._extract_info(raw_text)
-                        
+                    # 1. XML 응답 처리
+                    if content.startswith('<'):
+                        try:
+                            root = ET.fromstring(content)
+                            for elem in root.iter():
+                                if 'PRDT_ADD_EXPL' in elem.tag and elem.text:
+                                    raw_info_text = elem.text
+                                    break
+                        except Exception as e:
+                            self.logger.error(f"XML 파싱 에러: {e}")
+
+                    # 2. JSON 응답 처리
+                    else:
+                        try:
+                            res_json = response.json()
+                            def find_field(obj):
+                                if isinstance(obj, dict):
+                                    if obj.get('PRDT_ADD_EXPL'): return obj['PRDT_ADD_EXPL']
+                                    for v in obj.values():
+                                        res = find_field(v)
+                                        if res: return res
+                                elif isinstance(obj, list):
+                                    for i in obj:
+                                        res = find_field(i)
+                                        if res: return res
+                                return None
+                            raw_info_text = find_field(res_json)
+                        except Exception as e:
+                            self.logger.error(f"JSON 파싱 에러: {e}")
+
+                    if raw_info_text:
+                        self.logger.info(f"데이터 추출 성공: {raw_info_text}")
+                        info = self._extract_from_text(raw_info_text)
                         return {
-                            'name': extracted['name'],
-                            'power': extracted['power'],
+                            'name': info['name'],
+                            'power': info['power'],
                             'manufacturer': "정부 DB 등록 제품",
                             'gtin': gtin
                         }
             except Exception as e:
-                self.logger.error(f"오류 발생: {e}")
-                continue
+                self.logger.error(f"접속 에러: {e}")
         
         return None
 
