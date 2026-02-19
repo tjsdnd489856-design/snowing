@@ -9,122 +9,96 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """모든 단계의 진행 과정을 투명하게 출력하는 정밀 진단 클라이언트"""
+    """가짜 데이터를 완벽 차단하고 상세 과정을 출력하는 정밀 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
         self.base_url = "https://apis.data.go.kr/1471000"
 
-    def _clean_val(self, val: Any) -> str:
-        if not val or str(val).lower() in ["null", "none", "nan", "평가되지", "평가되지 않음"]:
-            return ""
-        return str(val).strip().replace('"', '').replace('}', '').replace(',', '')
+    def _is_garbage(self, text: str) -> bool:
+        """깨끗해진 텍스트가 여전히 가짜 정보인지 확인"""
+        if not text or len(text) < 2: return True
+        garbage = ["null", "none", "nan", "평가되지", "undefined", "미등록", "미지정", "n/a"]
+        return text.lower() in garbage
 
     def _extract_from_content(self, content: str) -> Optional[Dict[str, str]]:
-        """어떤 형식(JSON/XML)에서든 제품명과 도수를 추출하는 정밀 파서"""
-        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "PRDT_NM", "ITEM_NM", "MDEQ_PRDLST_NM"]
+        """어떤 형식에서든 알맹이만 쏙 뽑아내는 로직"""
+        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "PRDT_NM", "ITEM_NM", "MDEQ_PRDLST_NM", "PRDLST_NM"]
         
         for field in fields:
             match = re.search(rf'{field}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
             if match:
-                text = self._clean_val(match.group(1))
-                if len(text) > 1:
-                    # 도수 추출 시도
-                    power_match = re.search(r'([+-]?\d+\.\d{2})', text)
+                # 먼저 불순물 제거
+                raw = match.group(1).strip().replace('"', '').replace('}', '').replace(',', '').replace(';', '')
+                if not self._is_garbage(raw):
+                    # 도수 분리
+                    power_match = re.search(r'([+-]?\d+\.\d{2})', raw)
                     power = power_match.group(1) if power_match else "N/A"
-                    # 이름 정리
-                    name = text.replace(power, "")
-                    name = re.sub(r'\(.*?\)', '', name).strip("- ").strip()
-                    if len(name) >= 2:
+                    name = raw.replace(power, "").strip("- ").strip()
+                    if not self._is_garbage(name):
                         return {"name": name, "power": power, "field": field}
         return None
 
     def _try_request(self, service: str, endpoint: str, param: str, val: str) -> Optional[str]:
-        """단일 API 요청을 수행하고 상세 과정을 출력합니다."""
+        """API 요청 및 상태 출력"""
         url = f"{self.base_url}/{service}/{endpoint}"
         full_url = f"{url}?serviceKey={self.api_key}&type=json&pageNo=1&numOfRows=1&{param}={val}"
         
-        # API 키 일부만 노출하여 보안 유지
-        key_hint = self.api_key[:5] + "..." if self.api_key else "None"
-        print(f"  [요청] {service} > {endpoint} ({param}={val})")
-        
+        print(f"  [요청] {endpoint} ({param}={val})")
         try:
             response = requests.get(full_url, timeout=7)
-            status = response.status_code
-            
-            if status == 200:
-                content = response.text
-                # 결과 0건 체크
-                if '"totalCount":0' in content or '<totalCount>0' in content:
-                    print(f"  [결과] {endpoint}: 검색 결과 0건 (서버에 데이터 없음)")
+            if response.status_code == 200:
+                # 0건 결과는 None 반환
+                if '"totalCount":0' in response.text or '<totalCount>0' in response.text:
+                    print(f"  [결과] {endpoint}: 데이터 없음")
                     return None
-                print(f"  [결과] {endpoint}: 데이터 수신 성공 (200 OK)")
-                return content
-            elif status == 401:
-                print(f"  [에러] {endpoint}: 인증 실패 (401) - API 키가 만료되었거나 승인 대기 중입니다.")
-            elif status == 404:
-                print(f"  [에러] {endpoint}: 주소를 찾을 수 없음 (404)")
+                return response.text
             else:
-                print(f"  [에러] {endpoint}: 서버 응답 오류 ({status})")
-        except Exception as e:
-            print(f"  [에러] {endpoint}: 연결 실패 ({str(e)})")
+                print(f"  [실패] {endpoint}: 상태코드 {response.status_code}")
+        except Exception:
+            pass
         return None
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """모든 과정을 화면에 출력하며 정보를 추적합니다."""
+        """모든 단계를 거쳐 진짜 정보만 가져옵니다."""
         if not identifier: return None
         target_id = identifier.zfill(14)
-        print(f"\n--- 🛰️ 식약처 DB 정밀 추적 시작 (ID: {target_id}) ---")
+        print(f"\n--- 🛰️ 정밀 추적 시작: {target_id} ---")
 
-        # --- 1단계: 식별자 확보 (MsUdedi) ---
-        print(f"\n[1단계] 고유 식별자(UDI-DI) 확보 시도")
-        list_content = self._try_request("MsUdediInfoService", "getUdediList", "UDIDI_CD", target_id)
-        
-        udidi_cd = None
-        if list_content:
-            match = re.search(r'UDIDI_CD["\>\]\s:]+([^"<\n]+)', list_content, re.IGNORECASE)
-            if match:
-                udidi_cd = self._clean_val(match.group(1))
-                print(f"  🎯 식별자 발견: {udidi_cd}")
-            else:
-                print("  ⚠️ 데이터는 받았으나 UDIDI_CD 필드를 추출하지 못했습니다.")
-
-        final_di = udidi_cd if udidi_cd else target_id
-        if not udidi_cd:
-            print(f"  ℹ️ 식별자를 못 찾아 입력값({target_id})으로 2단계를 진행합니다.")
-
-        # --- 2단계: 상세 정보 병렬 조회 ---
-        print(f"\n[2단계] 상세 정보 금고 동시 조회 시작")
+        # 1단계: MsUdediInfoService 우선 조회
+        print("\n[1단계] 최신 UDI/EDI 서비스 확인")
         tasks = [
             ("MsUdediInfoService", "getUdediInfo", "UDIDI_CD"),
+            ("MsUdediInfoService", "getUdediList", "UDIDI_CD")
+        ]
+        
+        for svc, end, param in tasks:
+            content = self._try_request(svc, end, param, target_id)
+            if content:
+                info = self._extract_from_content(content)
+                if info:
+                    print(f"✅ 발견! ({info['field']})")
+                    return {'name': info['name'], 'power': info['power'], 'manufacturer': "정부 DB 등록 제품", 'gtin': target_id}
+
+        # 2단계: 통합정보 서비스 폴백 (병렬)
+        print("\n[2단계] 표준코드 통합 서비스 동시 확인")
+        fallback_tasks = [
             ("MdeqStdCdUnityInfoService01", "getMdeqStdCdUnityInfoInq01", "UDIDI_CD"),
             ("MdeqStdCdUnityInfoService01", "getMdeqStdCdUnityInfoInq01", "udi_code"),
-            ("MdvUdiInfoService", "getMdvUdiInfoInq01", "UDIDI_CD")
+            ("MdeqStdCdUnityInfoService01", "getMdeqStdCdInq01", "gtin_code")
         ]
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_task = {executor.submit(self._try_request, *task, final_di): task for task in tasks}
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(self._try_request, *task, target_id) for task in fallback_tasks]
+            for future in as_completed(futures):
                 content = future.result()
                 if content:
                     info = self._extract_from_content(content)
                     if info:
-                        print(f"\n[성공] '{info['field']}' 필드에서 최종 정보 추출 완료!")
-                        print(f"  📦 제품명: {info['name']}")
-                        print(f"  💎 도수: {info['power']}")
-                        print(f"--- 🛰️ 정밀 추적 종료 ---\n")
-                        return {
-                            'name': info['name'],
-                            'power': info['power'],
-                            'manufacturer': "식약처 등록 제품",
-                            'gtin': final_di
-                        }
-                    else:
-                        print(f"  ⚠️ {task[1]}: 데이터를 받았으나 유효한 제품명/도수 파싱에 실패했습니다.")
+                        print(f"✅ 발견! ({info['field']})")
+                        return {'name': info['name'], 'power': info['power'], 'manufacturer': "정부 DB 등록 제품", 'gtin': target_id}
 
-        print(f"\n[실패] 모든 서랍을 뒤졌으나 정보를 찾지 못했습니다.")
-        print(f"--- 🛰️ 정밀 추적 종료 ---\n")
+        print("\n❌ 유효한 정보를 찾지 못했습니다. (수동 입력 필요)")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
