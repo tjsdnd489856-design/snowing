@@ -2,8 +2,6 @@ import os
 import time
 import requests
 import logging
-import urllib.parse
-import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
 from dotenv import load_dotenv
@@ -11,83 +9,100 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """식약처 API 주소 체계를 완벽하게 탐색하는 클라이언트"""
+    """공공데이터포털 전용 수동 URL 조립 클라이언트"""
 
     def __init__(self):
-        raw_key = os.getenv("LENS_API_KEY")
-        self.api_key = urllib.parse.unquote(raw_key) if raw_key else ""
+        self.api_key = os.getenv("LENS_API_KEY")
         self.base_url = os.getenv("LENS_API_BASE_URL").rstrip('/')
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """주소 후보군을 순차적으로 찔러보며 이름과 도수를 반드시 찾아냅니다."""
-        if not identifier: return None
-        gtin = identifier.zfill(14)
+        """인증키 변형을 막기 위해 URL을 수동으로 조립하여 호출합니다."""
+        if not identifier or not self.api_key:
+            self.logger.error("API 키 또는 식별자가 없습니다.")
+            return None
         
-        # [최종 후보 주소군] 
-        # 1. 표준코드조회 (이름/도수 확률 높음)
-        # 2. 통합정보조회 (아까 데이터 찾았던 곳)
-        # 3. 서비스 기본 주소
+        # 13자리와 14자리 두 가지 버전을 준비
+        gtin_14 = identifier.zfill(14)
+        gtin_13 = identifier[-13:] if len(identifier) >= 13 else identifier
+
+        # 시도할 엔드포인트와 파라미터 조합
         endpoints = [
             f"{self.base_url}/getMdeqStdCdInq01",
             f"{self.base_url}/getMdeqStdCdUnityInfoInq01",
             self.base_url
         ]
-
+        
         for url in endpoints:
-            for param in ["gtin_code", "udi_code"]:
-                params = {
-                    "serviceKey": self.api_key,
-                    "type": "json",
-                    "pageNo": "1",
-                    "numOfRows": "1",
-                    param: gtin
-                }
-
-                try:
-                    response = requests.get(url, params=params, timeout=10)
+            for gtin_val in [gtin_14, gtin_13]:
+                for param_name in ["gtin_code", "udi_code"]:
+                    # [핵심] requests의 params를 쓰지 않고 URL을 직접 조립 (인증키 변형 방지)
+                    full_url = (
+                        f"{url}?serviceKey={self.api_key}"
+                        f"&type=json&pageNo=1&numOfRows=1"
+                        f"&{param_name}={gtin_val}"
+                    )
                     
-                    if response.status_code == 200:
-                        result = response.json()
-                        body = result.get('body', {})
-                        items = body.get('items', {})
+                    try:
+                        self.logger.info(f"요청 시도: {url.split('/')[-1]} ({param_name}={gtin_val})")
+                        response = requests.get(full_url, timeout=10)
                         
-                        # 데이터 리스트 추출
-                        item_list = []
-                        if isinstance(items, dict):
-                            item_data = items.get('item', [])
-                            item_list = item_data if isinstance(item_data, list) else [item_data]
-                        elif isinstance(items, list):
-                            item_list = items
+                        if response.status_code == 200:
+                            # 응답 내용 확인
+                            try:
+                                result = response.json()
+                                header = result.get('header', {})
+                                if header.get('resultCode') != '00':
+                                    self.logger.warning(f"서버 응답 결과 코드 오류: {header.get('resultMsg')}")
+                                    continue
 
-                        if item_list and len(item_list) > 0:
-                            # 모든 층의 데이터를 하나로 통합 (ITEM 안쪽까지)
-                            raw_data = item_list[0]
-                            final_data = {str(k).upper(): v for k, v in raw_data.items()}
+                                body = result.get('body', {})
+                                items_wrapper = body.get('items')
+                                item_list = []
+                                
+                                if isinstance(items_wrapper, dict):
+                                    item_data = items_wrapper.get('item', [])
+                                    item_list = item_data if isinstance(item_data, list) else [item_data]
+                                elif isinstance(items_wrapper, list):
+                                    item_list = items_wrapper
+
+                                if item_list and len(item_list) > 0:
+                                    # 모든 계층의 데이터를 통합하여 추출
+                                    target = item_list[0]
+                                    raw = {str(k).upper(): v for k, v in target.items()}
+                                    
+                                    # ITEM 내부 중첩 확인
+                                    nested = target.get('ITEM') or target.get('item')
+                                    if isinstance(nested, dict):
+                                        for nk, nv in nested.items(): raw[str(nk).upper()] = nv
+
+                                    model = raw.get('MODEL_NM') or raw.get('MODELNM') or ""
+                                    prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or ""
+                                    spec = raw.get('SPEC_NM') or raw.get('SPECNM') or "N/A"
+                                    
+                                    name = f"[{model}] {prdlst}".strip() if model and prdlst else (model or prdlst)
+                                    
+                                    if name:
+                                        self.logger.info(f"성공! 제품명: {name}")
+                                        return {
+                                            'name': str(name),
+                                            'power': str(spec),
+                                            'manufacturer': str(raw.get('ENTP_NM', 'N/A')),
+                                            'gtin': gtin_val
+                                        }
+                            except Exception as e:
+                                self.logger.error(f"데이터 파싱 중 오류: {e}")
+                        elif response.status_code == 401:
+                            self.logger.error("401 인증 오류: API 키가 잘못되었거나 아직 활성화되지 않았습니다.")
+                            return None # 인증 오류는 더 시도하지 않음
+                        elif response.status_code != 404:
+                            self.logger.warning(f"서버 응답 오류 ({response.status_code})")
                             
-                            # 중첩된 ITEM 상자가 있다면 그 안의 내용도 병합
-                            nested = raw_data.get('ITEM') or raw_data.get('item')
-                            if isinstance(nested, dict):
-                                for nk, nv in nested.items(): final_data[str(nk).upper()] = nv
-
-                            # [추출] 렌즈명(MODEL_NM)과 도수(SPEC_NM)
-                            name = final_data.get('MODEL_NM') or final_data.get('PRDLST_NM') or ""
-                            spec = final_data.get('SPEC_NM') or "N/A"
-                            
-                            if name:
-                                self.logger.info(f"성공! 주소: {url.split('/')[-1]} / 제품: {name} / 도수: {spec}")
-                                return {
-                                    'name': str(name).strip(),
-                                    'power': str(spec).strip(),
-                                    'manufacturer': str(final_data.get('ENTP_NM', 'N/A')),
-                                    'gtin': gtin
-                                }
-                    elif response.status_code == 404:
-                        continue # 다음 주소로 시도
-                except Exception:
-                    continue
-
+                    except Exception as e:
+                        self.logger.error(f"연결 오류: {e}")
+                        continue
+        
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
