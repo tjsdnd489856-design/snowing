@@ -33,12 +33,15 @@ def main():
             api_data = api.fetch_product_info(parsed_data['gtin'])
             if api_data:
                 parsed_data = api.sync_with_local_db(api_data, parsed_data)
-            else:
-                # API 실패 시 수동 입력 유도 (간소화)
-                if not parsed_data['name']:
-                    parsed_data['name'] = ui.get_input("제품명을 찾을 수 없습니다. 직접 입력")
+            
+            # 3. 최종 이름 확인 (비어있으면 수동 입력)
+            if not parsed_data.get('name') or parsed_data['name'].strip() == "":
+                ui.show_message("제품명을 찾을 수 없습니다. (정부 DB 미등록)", "warning")
+                parsed_data['name'] = ui.get_input("제품명 직접 입력")
+                if not parsed_data['name']: 
+                    parsed_data['name'] = "미지정 제품"
 
-            # 3. DB 저장
+            # 4. DB 저장
             if db.upsert_product(parsed_data):
                 ui.show_message(f"성공적으로 등록되었습니다: {parsed_data['name']}", "success")
             else:
@@ -60,10 +63,13 @@ def main():
 
         elif choice == '5':
             pid = ui.get_input("삭제할 제품 ID")
-            if db.delete_product(int(pid)):
-                ui.show_message("삭제 완료", "success")
-            else:
-                ui.show_message("삭제 실패", "error")
+            try:
+                if db.delete_product(int(pid)):
+                    ui.show_message("삭제 완료", "success")
+                else:
+                    ui.show_message("삭제 실패", "error")
+            except ValueError:
+                ui.show_message("유효한 ID를 입력하세요.", "error")
 
         elif choice == '0':
             ui.show_message("프로그램을 종료합니다.")
