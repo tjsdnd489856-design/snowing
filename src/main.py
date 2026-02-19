@@ -35,14 +35,16 @@ def main():
                 if api_data:
                     parsed_data = api.sync_with_local_db(api_data, parsed_data)
             
-            # [최종 방어] 이름이 비어있거나 'null' 계열인 경우 무조건 수동 입력
-            name_val = str(parsed_data.get('name', '')).lower().strip()
-            garbage = ["null", "none", "nan", "평가되지", "undefined", ""]
+            # [수정된 방어 로직] 
+            name_val = str(parsed_data.get('name', '')).strip()
+            # 빈 문자열("")은 리스트에서 빼고 별도로 체크합니다.
+            garbage = ["null", "none", "nan", "평가되지", "undefined", "미등록"]
             
-            is_invalid = not name_val or any(g in name_val for g in garbage)
+            # 이름이 아예 없거나, 금지 단어가 포함된 경우만 부적격 처리
+            is_invalid = not name_val or any(g in name_val.lower() for g in garbage)
             
             if is_invalid:
-                ui.show_message("유효한 제품명을 찾을 수 없습니다. (정보 부실)", "warning")
+                ui.show_message("유효한 제품명을 찾을 수 없습니다. (정부 DB 미등록 또는 정보 부실)", "warning")
                 manual_name = ui.get_input("제품명 직접 입력")
                 parsed_data['name'] = manual_name if manual_name else "미지정 제품"
 
