@@ -9,19 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """기존 서비스와 새로운 UDI/EDI 서비스를 통합하여 검색하는 병렬 클라이언트"""
+    """3가지 식약처 서비스를 통합하여 검색하는 초고속 병렬 클라이언트"""
 
     def __init__(self):
         self.api_key = os.getenv("LENS_API_KEY", "").strip()
-        # 공공데이터포털 기본 베이스 주소
         self.base_url = "https://apis.data.go.kr/1471000"
         
-        # 통합 검색할 서비스 및 엔드포인트 목록
+        # 통합 검색할 서비스 설정 (사용자 요청 서비스 우선순위 반영)
         self.search_configs = [
-            # 1. 의료기기 표준코드 통합정보 서비스 (기존)
-            {"service": "MdeqStdCdUnityInfoService01", "endpoints": ["getMdeqStdCdUnityInfoInq01", "getMdeqStdCdInq01"]},
-            # 2. 의료기기 UDI/EDI 정보 조회 서비스 (신규)
-            {"service": "MdvUdiInfoService", "endpoints": ["getMdvUdiInfoInq01"]}
+            # 1. 의료기기 UDI/EDI 정보 조회 서비스 (최신 요청)
+            {"service": "MsUdediInfoService", "endpoints": ["getUdediInfo"]},
+            # 2. 의료기기 UDI/EDI 정보 조회 서비스
+            {"service": "MdvUdiInfoService", "endpoints": ["getMdvUdiInfoInq01"]},
+            # 3. 의료기기 표준코드 통합정보 서비스
+            {"service": "MdeqStdCdUnityInfoService01", "endpoints": ["getMdeqStdCdUnityInfoInq01", "getMdeqStdCdInq01"]}
         ]
 
     def _is_garbage_name(self, name: str) -> bool:
@@ -34,14 +35,14 @@ class APIClient:
 
     def _extract_from_raw(self, content: str) -> Optional[Dict[str, str]]:
         """텍스트 뭉치에서 제품명과 도수를 추출합니다."""
-        # 1. PRDT_ADD_EXPL(상세설명), MODEL_NM(모델명), ITEM_NM(품목명) 순서로 검색
-        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM", "MDEQ_PRDLST_NM"]
+        # 모든 가능한 필드명 뒤지기
+        fields = ["PRDT_ADD_EXPL", "MODEL_NM", "ITEM_NM", "MDEQ_PRDLST_NM", "PRDLST_NM"]
         raw_text = None
         
         for field in fields:
             match = re.search(rf'{field}["\>\]\s:]+([^"<\n]+)', content, re.IGNORECASE)
             if match:
-                val = match.group(1).strip()
+                val = match.group(1).strip().replace('"', '').replace('}', '').replace(',', '')
                 if not self._is_garbage_name(val):
                     raw_text = val
                     break
@@ -84,10 +85,11 @@ class APIClient:
         return None
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """모든 식약처 서비스를 동시에 뒤져서 정보를 가져옵니다."""
+        """3개의 식약처 서비스를 동시에 뒤져서 정보를 가져옵니다."""
         if not identifier: return None
         
         target_ids = list(set([identifier.zfill(14), identifier[-13:], identifier]))
+        # 시도할 파라미터들
         params = ["UDIDI_CD", "udi_code", "gtin_code"]
 
         tasks = []
@@ -97,8 +99,8 @@ class APIClient:
                     for p in params:
                         tasks.append((config["service"], endpoint, p, tid))
 
-        # 병렬 실행 (최대 15개 스레드)
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        # 병렬 실행 (최대 20개 스레드)
+        with ThreadPoolExecutor(max_workers=20) as executor:
             future_to_task = {executor.submit(self._make_request, *task): task for task in tasks}
             
             for future in as_completed(future_to_task):
@@ -107,7 +109,7 @@ class APIClient:
                     print(f"⚡ [{result['source_service']}] 검색 성공: {result['name']}")
                     return result
 
-        print("📭 모든 식약처 서비스를 조회했으나 유효한 정보를 찾지 못했습니다.")
+        print("📭 모든 식약처 서비스(3종)를 조회했으나 유효한 정보를 찾지 못했습니다.")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
