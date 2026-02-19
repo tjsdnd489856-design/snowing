@@ -1,83 +1,67 @@
-import cv2
 import re
-from pyzbar import pyzbar
-from datetime import datetime
 import calendar
-from typing import Dict, Optional, Any
+from datetime import datetime
+from typing import Dict, Any, Optional
 
 class BarcodeParser:
-    """GS1-128 표준 가이드를 준수하는 정밀 바코드 파서"""
+    """GS1 표준 AI 식별자를 정밀 분석하여 UDI-DI, 유통기한, 로트번호를 추출하는 파서"""
 
     @staticmethod
     def parse_gs1_128(raw_data: str) -> Dict[str, Any]:
-        """AI(Application Identifier)를 분석하여 데이터를 정확히 분리합니다."""
-        # 불필요한 괄호나 공백 제거
-        clean = raw_data.replace('(', '').replace(')', '').strip()
+        """GS1-128 바코드를 AI 블록별로 해체합니다."""
+        # 괄호 제거 및 공백 정리
+        clean = raw_data.replace('(', '').replace(')', '').replace(' ', '').strip()
         
-        # 결과 기본값
         result = {
             'udi': raw_data,
             'gtin': '',
             'expire_date': '9999-12-31',
             'lot': 'N/A',
+            'manufacture_date': '',
             'power': 'N/A',
             'name': ''
         }
 
-        # 1. GTIN (AI: 01) 추출 - 고정 14자리
-        if clean.startswith('01'):
-            result['gtin'] = clean[2:16]
-            remaining = clean[16:]
-        elif len(clean) == 13 or len(clean) == 14:
-            # 숫자만 들어온 경우
-            result['gtin'] = clean.zfill(14)
-            remaining = ""
-        else:
-            # 01이 중간에 있는 경우 검색
-            match = re.search(r'01(\d{14})', clean)
-            if match:
-                result['gtin'] = match.group(1)
-                remaining = clean.replace(f"01{result['gtin']}", "")
-            else:
-                result['gtin'] = clean[:14].zfill(14)
-                remaining = clean[14:]
+        # 1. AI 01 (GTIN / UDI-DI) - 고정 14자리
+        # 문자열 내에서 01로 시작하거나 01을 포함하는 14자리 숫자를 찾습니다.
+        gtin_match = re.search(r'01(\d{14})', clean)
+        if gtin_match:
+            result['gtin'] = gtin_match.group(1)
+        elif len(clean) >= 14:
+            # 01이 생략된 경우를 대비해 앞의 14자리를 GTIN으로 시도
+            result['gtin'] = clean[:14]
 
-        # 2. 유통기한 (AI: 17) 추출 - 고정 6자리 (YYMMDD)
-        exp_match = re.search(r'17(\d{6})', remaining)
+        # 2. AI 17 (유통기한) - 고정 6자리 (YYMMDD)
+        exp_match = re.search(r'17(\d{6})', clean)
         if exp_match:
             val = exp_match.group(1)
             try:
                 year = int(val[0:2]) + 2000
                 month = int(val[2:4])
                 day = int(val[4:6])
-                # 일자가 00인 경우 해당 월의 말일로 보정
-                if day == 0:
+                if day == 0: # 일자가 00이면 해당 월 말일로
                     day = calendar.monthrange(year, month)[1]
                 result['expire_date'] = f"{year}-{month:02d}-{day:02d}"
-            except Exception:
-                pass
+            except Exception: pass
 
-        # 3. 로트 번호 (AI: 10) 추출 - 가변 길이
-        lot_match = re.search(r'10([a-zA-Z0-9]+)', remaining)
+        # 3. AI 10 (로트번호) - 가변 길이 (최대 20자)
+        # 10 뒤에 오되, 다른 AI(17, 21, 11)가 시작되기 전까지만 추출
+        lot_match = re.search(r'10([a-zA-Z0-9]+)', clean)
         if lot_match:
-            # 다른 AI(예: 17, 21)가 시작되기 전까지만 로트로 인정
             lot_val = lot_match.group(1)
-            # 보통 17이나 21이 뒤에 붙으므로 이를 잘라냄
+            # 다른 주요 AI 코드로 끊기
             lot_val = re.split(r'(17|21|11)', lot_val)[0]
             result['lot'] = lot_val
 
+        # 4. AI 11 (제조일자) - 고정 6자리
+        mfg_match = re.search(r'11(\d{6})', clean)
+        if mfg_match:
+            val = mfg_match.group(1)
+            try:
+                result['manufacture_date'] = f"20{val[0:2]}-{val[2:4]}-{val[4:6]}"
+            except Exception: pass
+
         return result
 
-    def read_from_image(self, image_path: str, retries: int = 3) -> Optional[str]:
-        image = cv2.imread(image_path)
-        if image is None: return None
-        for i in range(retries):
-            if i == 0: processed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            elif i == 1: _, processed = cv2.threshold(processed, 127, 255, cv2.THRESH_BINARY)
-            else: processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-            barcodes = pyzbar.decode(processed)
-            if barcodes: return barcodes[0].data.decode('utf-8')
-        return None
-
     def process_scanner_input(self, input_str: str) -> Dict[str, Any]:
-        return self.parse_gs1_128(input_str.strip())
+        return self.parse_gs1_128(input_str)

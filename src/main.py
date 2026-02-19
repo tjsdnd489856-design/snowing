@@ -18,6 +18,7 @@ def main():
             input_data = ui.get_input("바코드 입력 (이미지 경로 또는 스캐너 문자열)")
             if not input_data: continue
             
+            # 1. 이미지 처리
             if input_data.lower().endswith(('.png', '.jpg', '.jpeg')):
                 raw_barcode = parser.read_from_image(input_data)
             else:
@@ -27,22 +28,23 @@ def main():
                 ui.show_message("바코드를 인식할 수 없습니다.", "error")
                 continue
 
-            # [핵심] GS1 표준에 맞게 바코드 파싱
+            # 2. [핵심] GS1 표준 파싱 (유통기한, 로트번호 등 즉시 확보)
             parsed_data = parser.process_scanner_input(raw_barcode)
             
-            # [핵심] 추출된 GTIN(UDI-DI)으로 정석 2단계 조회 시작
-            search_id = parsed_data.get('gtin')
-            if search_id:
-                api_data = api.fetch_product_info(search_id)
+            # 3. [핵심] 추출된 UDI-DI(GTIN)로만 API 정석 조회
+            if parsed_data['gtin']:
+                api_data = api.fetch_product_info(parsed_data['gtin'])
                 if api_data:
+                    # API에서 가져온 제품명과 도수 합치기
                     parsed_data = api.sync_with_local_db(api_data, parsed_data)
             
-            # 최종 검증 및 수동 입력
+            # 4. 최종 확인 및 수동 입력
             if not parsed_data.get('name'):
-                ui.show_message("정부 DB에서 제품 정보를 찾을 수 없습니다.", "warning")
-                parsed_data['name'] = ui.get_input("제품명 직접 입력")
-                if not parsed_data['name']: parsed_data['name'] = "미지정 제품"
+                ui.show_message("정부 DB에서 제품명을 찾지 못했습니다.", "warning")
+                manual_name = ui.get_input("제품명 직접 입력")
+                parsed_data['name'] = manual_name if manual_name else "미지정 제품"
 
+            # 5. DB 저장
             if db.upsert_product(parsed_data):
                 ui.show_message(f"성공적으로 등록되었습니다: {parsed_data['name']}", "success")
             else:
