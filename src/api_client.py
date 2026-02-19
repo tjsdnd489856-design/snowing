@@ -3,6 +3,7 @@ import time
 import requests
 import logging
 import urllib.parse
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
 from dotenv import load_dotenv
@@ -10,34 +11,31 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """공공데이터포털 의료기기 API 전용 클라이언트"""
+    """식약처 의료기기 표준코드 통합정보 API 정밀 클라이언트"""
 
     def __init__(self):
-        # 공공데이터포털은 키가 이미 인코딩되어 오는 경우가 많아 처리가 중요합니다.
         raw_key = os.getenv("LENS_API_KEY")
+        # 공공데이터포털 특유의 인증키 인코딩/복호화 이슈 해결
         self.api_key = urllib.parse.unquote(raw_key) if raw_key else ""
         self.base_url = os.getenv("LENS_API_BASE_URL")
         self.cache: Dict[str, Dict[str, Any]] = {}
-        self.cache_ttl = 24
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
-    def fetch_product_info(self, identifier: str, retries: int = 2) -> Optional[Dict]:
-        """정부 DB에서 정보를 가져옵니다. (인증키 오류 방지 로직 포함)"""
-        if not identifier or not self.api_key: return None
+    def fetch_product_info(self, identifier: str) -> Optional[Dict]:
+        """모든 검색 필드를 동원하여 제품명과 도수를 찾아냅니다."""
+        if not identifier: return None
         
-        if identifier in self.cache:
-            entry = self.cache[identifier]
-            if datetime.now() < entry['expiry']: return entry['data']
-
+        # GTIN 표준인 14자리로 보정 (예: 880 -> 0880)
+        gtin = identifier.zfill(14)
+        
+        # 검색할 파라미터 후보군 (정부 API의 다양한 검색 필드)
+        search_candidates = ["gtin_code", "udi_code", "udi_di"]
+        
         endpoint = "getMdeqStdCdUnityInfoInq01"
         url = self.base_url.rstrip('/') + '/' + endpoint
-        
-        # GTIN 번호가 14자리가 아니면 보정 (앞에 0을 채움)
-        gtin = identifier.zfill(14)
 
-        for param_name in ["gtin_code", "udi_code"]:
-            # 공공데이터 API 전용 파라미터 구성
+        for param_name in search_candidates:
             params = {
                 "serviceKey": self.api_key,
                 "type": "json",
@@ -46,43 +44,43 @@ class APIClient:
                 param_name: gtin
             }
 
-            for i in range(retries):
-                try:
-                    # verify=False는 간혹 발생하는 SSL 보안 인증 오류 방지용입니다.
-                    response = requests.get(url, params=params, timeout=10, verify=True)
-                    
-                    if response.status_code == 200:
-                        try:
-                            result = response.json()
-                            items = result.get('body', {}).get('items', [])
+            try:
+                # 타임아웃을 늘리고 명확하게 호출
+                response = requests.get(url, params=params, timeout=15)
+                
+                if response.status_code == 200:
+                    try:
+                        result = response.json()
+                        # 정부 API 특유의 복잡한 body.items.item 구조 파싱
+                        body = result.get('body', {})
+                        items = body.get('items', [])
+                        
+                        if items:
+                            item = items[0] if isinstance(items, list) else items
                             
-                            if items:
-                                item = items[0]
-                                # 모델명(브랜드) -> 제품명 -> 품목명 순으로 가장 정확한 이름을 찾습니다.
-                                name = (item.get('MODEL_NM') or 
-                                        item.get('PRDLST_NM') or 
-                                        item.get('MDEQ_PRDLST_NM'))
-                                
-                                data = {
-                                    'name': str(name).strip() if name else "",
-                                    'power': str(item.get('SPEC_NM') or "N/A").strip(),
-                                    'manufacturer': str(item.get('ENTP_NM') or "N/A").strip(),
-                                    'gtin': gtin
-                                }
-                                
-                                if data['name']: # 이름이 있을 때만 캐시 저장
-                                    self.cache[identifier] = {
-                                        'data': data,
-                                        'expiry': datetime.now() + timedelta(hours=self.cache_ttl)
-                                    }
-                                    return data
-                        except Exception:
-                            self.logger.error("API 응답 해석 오류 (데이터 없음)")
-                    
-                except Exception as e:
-                    self.logger.error(f"API 접속 실패: {e}")
-                    time.sleep(0.5)
+                            # 1. 이름 추출 (모델명 우선, 없으면 품목명)
+                            brand_name = item.get('MODEL_NM') or ""
+                            product_type = item.get('PRDLST_NM') or item.get('MDEQ_PRDLST_NM') or ""
+                            full_name = f"[{brand_name}] {product_type}".strip() if brand_name else product_type
+                            
+                            # 2. 도수(Power) 추출 (규격 정보에서 추출)
+                            spec = item.get('SPEC_NM') or "N/A"
+                            
+                            self.logger.info(f"데이터 발견! [{param_name}] 기반 검색 성공")
+                            return {
+                                'name': full_name or "이름 미등록 제품",
+                                'power': spec,
+                                'manufacturer': item.get('ENTP_NM', 'N/A'),
+                                'gtin': item.get('GTIN_CODE') or identifier
+                            }
+                    except json.JSONDecodeError:
+                        self.logger.error("정부 API가 JSON이 아닌 HTML(에러페이지)을 반환했습니다. 인증키를 확인하세요.")
+                elif response.status_code == 401:
+                    self.logger.error("인증 오류(401): API 키가 유효하지 않거나 승인 대기 중입니다.")
+            except Exception as e:
+                self.logger.error(f"접속 시도 중 오류 발생: {e}")
         
+        self.logger.warning(f"정부 DB에서 {identifier}에 해당하는 정보를 찾을 수 없습니다.")
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
@@ -90,4 +88,6 @@ class APIClient:
         if api_data:
             synced['name'] = api_data.get('name') or local_data.get('name')
             synced['power'] = api_data.get('power') or local_data.get('power')
+            synced['gtin'] = api_data.get('gtin') or local_data.get('gtin')
+            synced['source'] = 'api'
         return synced
