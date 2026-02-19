@@ -10,28 +10,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """식약처 의료기기 표준코드 정보(제품명/도수) 전용 클라이언트"""
+    """식약처 API 응답의 모든 층을 검색하여 정보를 추출하는 최종 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
         self.api_key = urllib.parse.unquote(raw_key) if raw_key else ""
         self.base_url = os.getenv("LENS_API_BASE_URL")
-        self.cache: Dict[str, Dict[str, Any]] = {}
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """정부 DB의 '표준코드 정보 조회' 기능을 사용하여 이름과 도수를 가져옵니다."""
+        """주소 복구 및 모든 데이터 층을 통합 검색하여 이름/도수를 가져옵니다."""
         if not identifier: return None
         
-        # 14자리 GTIN 규격으로 보정
         gtin = identifier.zfill(14)
-        
-        # [중요] 제품명과 규격이 들어있는 정확한 기능명으로 변경
-        endpoint = "getMdeqStdCdInq01" 
-        # 베이스 URL 주소 정리
-        base = self.base_url.split('/MdeqStdCdUnityInfoService01')[0]
-        url = f"{base}/MdeqStdCdUnityInfoService01/{endpoint}"
+        # 작동이 확인된 기본 엔드포인트로 복구
+        endpoint = "getMdeqStdCdUnityInfoInq01"
+        url = self.base_url.rstrip('/') + '/' + endpoint
 
         for param_name in ["gtin_code", "udi_code"]:
             params = {
@@ -57,22 +52,27 @@ class APIClient:
                         item_list = items_wrapper
 
                     if item_list and len(item_list) > 0:
-                        target = item_list[0]
-                        # ITEM 상자 안에 정보가 한 번 더 포장되어 있을 경우를 위해
-                        if isinstance(target, dict) and (target.get('ITEM') or target.get('item')):
-                            target = target.get('ITEM') or target.get('item')
+                        main_item = item_list[0]
+                        
+                        # [핵심] 모든 층의 데이터를 하나로 합침
+                        # 바깥층(부모) 정보 + 안쪽층(ITEM) 정보를 통합
+                        combined_data = {str(k).upper(): v for k, v in main_item.items()}
+                        
+                        nested = main_item.get('ITEM') or main_item.get('item')
+                        if isinstance(nested, dict):
+                            for k, v in nested.items():
+                                combined_data[str(k).upper()] = v
+                        elif isinstance(nested, list) and len(nested) > 0:
+                            if isinstance(nested[0], dict):
+                                for k, v in nested[0].items():
+                                    combined_data[str(k).upper()] = v
 
-                        # 모든 키를 대문자로 변환하여 분석
-                        raw = {str(k).upper(): v for k, v in target.items()}
+                        # 제품명 후보군 검색
+                        model = combined_data.get('MODEL_NM') or combined_data.get('MODELNM') or ""
+                        prdlst = combined_data.get('PRDLST_NM') or combined_data.get('MDEQ_PRDLST_NM') or ""
+                        spec = combined_data.get('SPEC_NM') or combined_data.get('SPECNM') or "N/A"
+                        entp = combined_data.get('ENTP_NM') or combined_data.get('ENTPNM') or "N/A"
                         
-                        # [확인된 필드 매핑]
-                        # MODEL_NM: 모델명(브랜드명), PRDLST_NM: 품목명, SPEC_NM: 상세규격(도수)
-                        model = raw.get('MODEL_NM') or raw.get('MODELNM') or ""
-                        prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or ""
-                        spec = raw.get('SPEC_NM') or raw.get('SPECNM') or "N/A"
-                        entp = raw.get('ENTP_NM') or raw.get('ENTPNM') or "N/A"
-                        
-                        # 이름 결정: [모델명] 품목명 형태
                         name = ""
                         if model and prdlst: name = f"[{model}] {prdlst}"
                         elif model: name = model
@@ -80,19 +80,18 @@ class APIClient:
                         else: name = "이름 정보 없음"
 
                         if name != "이름 정보 없음":
-                            self.logger.info(f"성공: {name} / 도수: {spec}")
+                            self.logger.info(f"정보 추출 성공: {name} / 도수: {spec}")
                             return {
                                 'name': str(name).strip(),
                                 'power': str(spec).strip(),
                                 'manufacturer': str(entp).strip(),
-                                'gtin': raw.get('GTIN_CODE') or gtin
+                                'gtin': combined_data.get('GTIN_CODE') or gtin
                             }
                         else:
-                            self.logger.warning(f"데이터는 찾았으나 제품명 필드가 비어있음. 필드목록: {list(raw.keys())}")
-                else:
-                    self.logger.error(f"API 오류 코드: {response.status_code}")
+                            self.logger.warning(f"데이터 발견했으나 이름 필드 누락. 확인된 필드: {list(combined_data.keys())}")
+                
             except Exception as e:
-                self.logger.error(f"접속 중 예외 발생: {e}")
+                self.logger.error(f"접속 시도 오류: {e}")
         
         return None
 
