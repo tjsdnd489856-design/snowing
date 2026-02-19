@@ -11,92 +11,83 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class APIClient:
-    """식약처 표준코드 DB에서 제품명과 도수를 반드시 찾아내는 클라이언트"""
+    """식약처 API 주소 체계를 완벽하게 탐색하는 클라이언트"""
 
     def __init__(self):
         raw_key = os.getenv("LENS_API_KEY")
-        # 공공데이터포털 인증키는 복호화된 상태로 사용해야 오류가 없습니다.
         self.api_key = urllib.parse.unquote(raw_key) if raw_key else ""
-        self.base_url = os.getenv("LENS_API_BASE_URL")
+        self.base_url = os.getenv("LENS_API_BASE_URL").rstrip('/')
         self.logger = logging.getLogger("APIClient")
         logging.basicConfig(level=logging.INFO)
 
     def fetch_product_info(self, identifier: str) -> Optional[Dict]:
-        """정부 DB의 '표준코드 기본정보' 서랍을 열어 제품명과 도수를 가져옵니다."""
+        """주소 후보군을 순차적으로 찔러보며 이름과 도수를 반드시 찾아냅니다."""
         if not identifier: return None
-        
-        # 14자리 GTIN 규격 보정
         gtin = identifier.zfill(14)
         
-        # [핵심] 404 에러 방지를 위해 사용자님이 주신 주소에 기능을 직접 연결
-        # 기본주소: https://apis.data.go.kr/1471000/MdeqStdCdUnityInfoService01
-        # 기능명: getMdeqStdCdInq01 (이것이 제품명/도수가 있는 진짜 서랍입니다)
-        url = self.base_url.rstrip('/') + '/getMdeqStdCdInq01'
+        # [최종 후보 주소군] 
+        # 1. 표준코드조회 (이름/도수 확률 높음)
+        # 2. 통합정보조회 (아까 데이터 찾았던 곳)
+        # 3. 서비스 기본 주소
+        endpoints = [
+            f"{self.base_url}/getMdeqStdCdInq01",
+            f"{self.base_url}/getMdeqStdCdUnityInfoInq01",
+            self.base_url
+        ]
 
-        # GTIN_CODE와 UDI_CODE 두 가지 파라미터로 모두 찔러봅니다.
-        for param_name in ["gtin_code", "udi_code"]:
-            params = {
-                "serviceKey": self.api_key,
-                "type": "json",
-                "pageNo": "1",
-                "numOfRows": "1",
-                param_name: gtin
-            }
+        for url in endpoints:
+            for param in ["gtin_code", "udi_code"]:
+                params = {
+                    "serviceKey": self.api_key,
+                    "type": "json",
+                    "pageNo": "1",
+                    "numOfRows": "1",
+                    param: gtin
+                }
 
-            try:
-                # 공공데이터 API는 HTTPS 보안 인증에 민감할 수 있어 timeout을 넉넉히 잡습니다.
-                response = requests.get(url, params=params, timeout=15)
-                
-                if response.status_code == 200:
-                    try:
+                try:
+                    response = requests.get(url, params=params, timeout=10)
+                    
+                    if response.status_code == 200:
                         result = response.json()
                         body = result.get('body', {})
-                        items_wrapper = body.get('items', {})
+                        items = body.get('items', {})
                         
-                        # 아이템 추출 (리스트 또는 단일 객체 대응)
+                        # 데이터 리스트 추출
                         item_list = []
-                        if isinstance(items_wrapper, dict):
-                            item_data = items_wrapper.get('item', [])
+                        if isinstance(items, dict):
+                            item_data = items.get('item', [])
                             item_list = item_data if isinstance(item_data, list) else [item_data]
-                        elif isinstance(items_wrapper, list):
-                            item_list = items_wrapper
+                        elif isinstance(items, list):
+                            item_list = items
 
                         if item_list and len(item_list) > 0:
-                            data = item_list[0]
-                            # 대소문자 구분 없이 모든 키를 뒤집니다.
-                            raw = {str(k).upper(): v for k, v in data.items()}
+                            # 모든 층의 데이터를 하나로 통합 (ITEM 안쪽까지)
+                            raw_data = item_list[0]
+                            final_data = {str(k).upper(): v for k, v in raw_data.items()}
                             
-                            # [우리가 찾는 진짜 정보]
-                            # MODEL_NM: 제품 브랜드명 (예: 클라렌)
-                            # PRDLST_NM: 품목명 (예: 소프트콘택트렌즈)
-                            # SPEC_NM: 도수/곡률 (예: -3.00)
-                            model = raw.get('MODEL_NM') or raw.get('ITEM_NM') or ""
-                            prdlst = raw.get('PRDLST_NM') or raw.get('MDEQ_PRDLST_NM') or ""
-                            spec = raw.get('SPEC_NM') or "N/A"
-                            
-                            name = f"[{model}] {prdlst}".strip() if model and prdlst else (model or prdlst)
+                            # 중첩된 ITEM 상자가 있다면 그 안의 내용도 병합
+                            nested = raw_data.get('ITEM') or raw_data.get('item')
+                            if isinstance(nested, dict):
+                                for nk, nv in nested.items(): final_data[str(nk).upper()] = nv
+
+                            # [추출] 렌즈명(MODEL_NM)과 도수(SPEC_NM)
+                            name = final_data.get('MODEL_NM') or final_data.get('PRDLST_NM') or ""
+                            spec = final_data.get('SPEC_NM') or "N/A"
                             
                             if name:
-                                self.logger.info(f"성공! 제품명: {name} / 도수: {spec}")
+                                self.logger.info(f"성공! 주소: {url.split('/')[-1]} / 제품: {name} / 도수: {spec}")
                                 return {
-                                    'name': str(name),
-                                    'power': str(spec),
-                                    'manufacturer': str(raw.get('ENTP_NM', 'N/A')),
+                                    'name': str(name).strip(),
+                                    'power': str(spec).strip(),
+                                    'manufacturer': str(final_data.get('ENTP_NM', 'N/A')),
                                     'gtin': gtin
                                 }
-                            else:
-                                # 찾았는데 이름이 없는 경우, 전체 데이터를 찍어서 분석합니다.
-                                self.logger.warning(f"데이터를 찾았으나 이름 필드가 없습니다: {json.dumps(raw, ensure_ascii=False)}")
-                    except Exception as e:
-                        self.logger.error(f"응답 해석 중 오류: {e}")
-                elif response.status_code == 404:
-                    self.logger.error(f"404 에러: 주소({url})를 서버가 찾을 수 없습니다.")
-                else:
-                    self.logger.error(f"서버 응답 에러: {response.status_code}")
-                    
-            except Exception as e:
-                self.logger.error(f"연결 오류: {e}")
-        
+                    elif response.status_code == 404:
+                        continue # 다음 주소로 시도
+                except Exception:
+                    continue
+
         return None
 
     def sync_with_local_db(self, api_data: Dict, local_data: Dict) -> Dict:
