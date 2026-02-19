@@ -18,7 +18,6 @@ def main():
             input_data = ui.get_input("바코드 입력 (이미지 경로 또는 스캐너 문자열)")
             if not input_data: continue
             
-            # 1. 바코드 파싱
             if input_data.lower().endswith(('.png', '.jpg', '.jpeg')):
                 raw_barcode = parser.read_from_image(input_data)
             else:
@@ -30,20 +29,23 @@ def main():
 
             parsed_data = parser.process_scanner_input(raw_barcode)
             
-            # 2. 외부 API 조회 (GTIN 번호가 있는 경우에만 시도)
             search_id = parsed_data.get('gtin') or raw_barcode
             if search_id:
                 api_data = api.fetch_product_info(search_id)
                 if api_data:
                     parsed_data = api.sync_with_local_db(api_data, parsed_data)
             
-            # 3. 최종 이름 확인 (비어있거나 null이면 수동 입력)
-            if not parsed_data.get('name') or str(parsed_data['name']).lower() in ["null", "none", ""]:
-                ui.show_message("제품명을 찾을 수 없습니다. (정부 DB 미등록 또는 정보 부실)", "warning")
-                parsed_data['name'] = ui.get_input("제품명 직접 입력")
-                if not parsed_data['name']: parsed_data['name'] = "미지정 제품"
+            # [최종 방어] 이름이 비어있거나 'null' 계열인 경우 무조건 수동 입력
+            name_val = str(parsed_data.get('name', '')).lower().strip()
+            garbage = ["null", "none", "nan", "평가되지", "undefined", ""]
+            
+            is_invalid = not name_val or any(g in name_val for g in garbage)
+            
+            if is_invalid:
+                ui.show_message("유효한 제품명을 찾을 수 없습니다. (정보 부실)", "warning")
+                manual_name = ui.get_input("제품명 직접 입력")
+                parsed_data['name'] = manual_name if manual_name else "미지정 제품"
 
-            # 4. DB 저장
             if db.upsert_product(parsed_data):
                 ui.show_message(f"성공적으로 등록되었습니다: {parsed_data['name']}", "success")
             else:
