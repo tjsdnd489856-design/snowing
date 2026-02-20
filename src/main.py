@@ -4,82 +4,98 @@ from src.barcode_parser import BarcodeParser
 from src.api_client import APIClient
 from src.ui import LensUI
 
-def main():
-    db = Database()
-    parser = BarcodeParser()
-    api = APIClient()
-    ui = LensUI()
+class LensApp:
+    """콘택트렌즈 관리 시스템의 전체 흐름을 제어하는 클래스입니다."""
 
-    while True:
-        ui.display_menu()
-        choice = ui.get_input("선택")
+    def __init__(self):
+        self.db = Database()
+        self.parser = BarcodeParser()
+        self.api = APIClient()
+        self.ui = LensUI()
 
-        if choice == '1':
-            input_data = ui.get_input("바코드 입력 (이미지 경로 또는 스캐너 문자열)")
-            if not input_data: continue
-            
-            # 1. 이미지 처리
-            if input_data.lower().endswith(('.png', '.jpg', '.jpeg')):
-                raw_barcode = parser.read_from_image(input_data)
+    def run(self):
+        """프로그램 메인 루프를 실행합니다."""
+        while True:
+            self.ui.display_menu()
+            choice = self.ui.get_input("원하시는 작업의 번호를 선택하세요")
+
+            if choice == '1':
+                self.handle_barcode_scan()
+            elif choice == '2':
+                self.ui.show_products(self.db.list_products(), "전체 제품 목록")
+            elif choice == '3':
+                self.handle_expiration_check()
+            elif choice == '4':
+                self.handle_search()
+            elif choice == '5':
+                self.handle_delete()
+            elif choice == '0':
+                self.ui.show_message("프로그램을 종료합니다. 감사합니다.")
+                break
             else:
-                raw_barcode = input_data
-            
+                self.ui.show_message("잘못된 선택입니다. 다시 입력해주세요.", "warning")
+
+    def handle_barcode_scan(self):
+        """바코드를 스캔하여 제품을 등록하는 로직입니다."""
+        input_data = self.ui.get_input("바코드 입력 (이미지 경로 또는 스캐너 문자열)")
+        if not input_data:
+            return
+
+        # 1. 원본 데이터 확보 (이미지 파일인 경우 인식 시도)
+        raw_barcode = input_data
+        if input_data.lower().endswith(('.png', '.jpg', '.jpeg')):
+            raw_barcode = self.parser.read_from_image(input_data)
             if not raw_barcode:
-                ui.show_message("바코드를 인식할 수 없습니다.", "error")
-                continue
+                self.ui.show_message("이미지에서 바코드를 읽을 수 없습니다.", "error")
+                return
 
-            # 2. [핵심] GS1 표준 파싱 (유통기한, 로트번호 등 즉시 확보)
-            parsed_data = parser.process_scanner_input(raw_barcode)
-            
-            # 3. [핵심] 추출된 UDI-DI(GTIN)로만 API 정석 조회
-            if parsed_data['gtin']:
-                api_data = api.fetch_product_info(parsed_data['gtin'])
-                if api_data:
-                    # API에서 가져온 제품명과 도수 합치기
-                    parsed_data = api.sync_with_local_db(api_data, parsed_data)
-            
-            # 4. 최종 확인 및 수동 입력
-            if not parsed_data.get('name'):
-                ui.show_message("정부 DB에서 제품명을 찾지 못했습니다.", "warning")
-                manual_name = ui.get_input("제품명 직접 입력")
-                parsed_data['name'] = manual_name if manual_name else "미지정 제품"
+        # 2. 바코드 정보 분석
+        parsed_data = self.parser.process_scanner_input(raw_barcode)
+        
+        # 3. 식약처 API 연동 (GTIN 정보가 있는 경우)
+        if parsed_data.get('gtin'):
+            api_info = self.api.fetch_product_info(parsed_data['gtin'])
+            parsed_data = self.api.sync_with_local_db(api_info, parsed_data)
+        
+        # 4. 제품명 보완 및 최종 저장
+        if not parsed_data.get('name'):
+            self.ui.show_message("제품명을 가져오지 못했습니다.", "warning")
+            manual_name = self.ui.get_input("제품명을 수동으로 입력해주세요 (공란 시 '미지정')")
+            parsed_data['name'] = manual_name if manual_name else "미지정 제품"
 
-            # 5. DB 저장
-            if db.upsert_product(parsed_data):
-                ui.show_message(f"성공적으로 등록되었습니다: {parsed_data['name']}", "success")
-            else:
-                ui.show_message("DB 저장 중 오류 발생", "error")
-
-        elif choice == '2':
-            products = db.list_products()
-            ui.show_products(products, "전체 제품 목록")
-
-        elif choice == '3':
-            exp_data = db.get_expiring_products()
-            ui.show_products(exp_data['expired'], "만료된 제품 (폐기 필요!)")
-            ui.show_products(exp_data['expiring'], "만료 임박 제품 (30일 이내)")
-
-        elif choice == '4':
-            search_term = ui.get_input("검색어 (이름/LOT/UDI)")
-            products = db.list_products(search_term)
-            ui.show_products(products, f"'{search_term}' 검색 결과")
-
-        elif choice == '5':
-            pid = ui.get_input("삭제할 제품 ID")
-            try:
-                if db.delete_product(int(pid)):
-                    ui.show_message("삭제 완료", "success")
-                else:
-                    ui.show_message("삭제 실패", "error")
-            except ValueError:
-                ui.show_message("유효한 ID를 입력하세요.", "error")
-
-        elif choice == '0':
-            ui.show_message("프로그램을 종료합니다.")
-            sys.exit(0)
-
+        if self.db.upsert_product(parsed_data):
+            self.ui.show_message(f"등록 성공: {parsed_data['name']}", "success")
         else:
-            ui.show_message("잘못된 선택입니다.", "warning")
+            self.ui.show_message("데이터 저장 중 오류가 발생했습니다.", "error")
+
+    def handle_expiration_check(self):
+        """유통기한 상태를 확인하고 출력합니다."""
+        exp_data = self.db.get_expiring_products()
+        self.ui.show_products(exp_data['expired'], "❌ 만료된 제품 (폐기 필요)")
+        self.ui.show_products(exp_data['expiring'], "⚠️ 만료 임박 제품 (30일 이내)")
+
+    def handle_search(self):
+        """키워드로 제품을 검색합니다."""
+        keyword = self.ui.get_input("검색어 (제품명/LOT/UDI)")
+        if keyword:
+            results = self.db.list_products(keyword)
+            self.ui.show_products(results, f"'{keyword}' 검색 결과")
+
+    def handle_delete(self):
+        """제품을 삭제합니다."""
+        pid = self.ui.get_input("삭제할 제품의 ID(숫자)")
+        if not pid.isdigit():
+            self.ui.show_message("유효한 숫자 ID를 입력해주세요.", "error")
+            return
+            
+        if self.db.delete_product(int(pid)):
+            self.ui.show_message("성공적으로 삭제되었습니다.", "success")
+        else:
+            self.ui.show_message("삭제에 실패했습니다. ID를 확인해주세요.", "error")
+
+def main():
+    app = LensApp()
+    app.run()
 
 if __name__ == "__main__":
     main()
