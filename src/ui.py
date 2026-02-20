@@ -25,12 +25,12 @@ class LensUI:
         """메인 메뉴를 세련된 패널 형태로 출력합니다."""
         self.clear_screen()
         
+        # '제품 검색' 항목을 삭제하고 번호를 재조정했습니다.
         menu_content = (
             "\n[bold white]1.[/bold white]  [cyan]바코드 스캔 & 등록[/cyan]    [dim](Barcode Scan)[/dim]\n"
             "[bold white]2.[/bold white]  [cyan]전체 제품 목록[/cyan]        [dim](List All)[/dim]\n"
             "[bold white]3.[/bold white]  [cyan]유통기한 점검[/cyan]         [dim](Check Expiry)[/dim]\n"
-            "[bold white]4.[/bold white]  [cyan]제품 검색[/cyan]             [dim](Search)[/dim]\n"
-            "[bold white]5.[/bold white]  [cyan]제품 삭제[/cyan]             [dim](Delete)[/dim]\n"
+            "[bold white]4.[/bold white]  [cyan]제품 삭제[/cyan]             [dim](Delete)[/dim]\n"
             "\n[dim]──────────────────────────────────────────[/dim]\n"
             "[bold white]0.[/bold white]  [red]종료[/red]                  [dim](Exit)[/dim]"
         )
@@ -76,7 +76,6 @@ class LensUI:
         for p in products:
             status_text, row_style = self._get_status_style(p.get('expire_date'), today)
             
-            # 수량이 0이면 흐리게 표시
             qty_style = "dim" if p.get('qty', 0) == 0 else "bold"
             
             table.add_row(

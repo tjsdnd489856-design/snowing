@@ -87,22 +87,18 @@ class Database:
             print(f"제품 저장/업데이트 중 오류 발생: {e}")
             return False
 
-    def list_products(self, search: str = "") -> List[Dict[str, Any]]:
-        """제품 목록 조회"""
-        query = "SELECT * FROM products"
-        params = ()
-        if search:
-            query += " WHERE name LIKE ? OR udi LIKE ? OR lot LIKE ?"
-            params = (f"%{search}%", f"%{search}%", f"%{search}%")
+    def list_products(self) -> List[Dict[str, Any]]:
+        """저장된 전체 제품 목록을 조회합니다."""
+        query = "SELECT * FROM products ORDER BY name ASC"
         try:
             with self._get_connection() as conn:
-                cursor = conn.execute(query, params)
+                cursor = conn.execute(query)
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error:
             return []
 
     def get_expiring_products(self, days: int = 30) -> Dict[str, List[Dict[str, Any]]]:
-        """유통기한 확인"""
+        """유통기한 상태 확인"""
         today = datetime.now().date().isoformat()
         try:
             with self._get_connection() as conn:

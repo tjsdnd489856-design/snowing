@@ -15,13 +15,20 @@ class LensApp:
         while True:
             self.ui.display_menu()
             choice = self.ui.get_input("번호 선택")
-            if choice == '1': self.handle_continuous_scan()
-            elif choice == '2': self.ui.show_products(self.db.list_products(), "전체 목록")
-            elif choice == '3': self.handle_expiration_check()
-            elif choice == '4': self.handle_search()
-            elif choice == '5': self.handle_delete()
-            elif choice == '0': break
-            else: self.ui.show_message("잘못된 선택입니다.", "warning")
+            
+            # 메뉴 번호 재매핑
+            if choice == '1': 
+                self.handle_continuous_scan()
+            elif choice == '2': 
+                self.ui.show_products(self.db.list_products(), "전체 목록")
+            elif choice == '3': 
+                self.handle_expiration_check()
+            elif choice == '4': 
+                self.handle_delete() # 기존 5번에서 4번으로 변경
+            elif choice == '0': 
+                break
+            else: 
+                self.ui.show_message("잘못된 선택입니다.", "warning")
 
     def handle_continuous_scan(self):
         self.ui.show_message("--- [연속 스캔 모드] ---", "info")
@@ -34,17 +41,14 @@ class LensApp:
                 raw_barcode = self.parser.read_from_image(input_data)
                 if not raw_barcode: continue
 
-            # [핵심 최적화] 1. 먼저 DB에서 즉시 확인 (0.01초)
             existing_product = self.db.get_product_by_udi(raw_barcode)
             if existing_product:
                 self.ui.show_message(f"이미 등록된 제품입니다: {existing_product['name']}", "success")
-                # 수량만 1 증가
                 existing_product['qty'] += 1
                 self.db.upsert_product(existing_product)
                 self.ui.show_message(f"수량이 추가되었습니다. (현재: {existing_product['qty']}개)", "info")
                 continue
 
-            # 2. DB에 없을 때만 느린 API 검색 수행
             parsed_data = self.parser.process_scanner_input(raw_barcode)
             if parsed_data.get('gtin'):
                 api_info = self.api.fetch_product_info(parsed_data['gtin'])
@@ -61,17 +65,15 @@ class LensApp:
 
     def handle_expiration_check(self):
         data = self.db.get_expiring_products()
-        self.ui.show_products(data['expired'], "❌ 만료됨")
-        self.ui.show_products(data['expiring'], "⚠️ 임박")
-
-    def handle_search(self):
-        kw = self.ui.get_input("검색어")
-        if kw: self.ui.show_products(self.db.list_products(kw), f"'{kw}' 결과")
+        self.ui.show_products(data['expired'], "❌ 만료된 제품 (폐기 필요)")
+        self.ui.show_products(data['expiring'], "⚠️ 만료 임박 제품 (30일 이내)")
 
     def handle_delete(self):
-        pid = self.ui.get_input("삭제할 ID")
+        pid = self.ui.get_input("삭제할 제품의 ID(숫자)")
         if pid.isdigit() and self.db.delete_product(int(pid)):
-            self.ui.show_message("삭제 완료", "success")
+            self.ui.show_message("성공적으로 삭제되었습니다.", "success")
+        else:
+            self.ui.show_message("삭제 실패. ID를 확인하세요.", "error")
 
 def main():
     LensApp().run()
