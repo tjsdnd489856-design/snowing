@@ -43,11 +43,18 @@ class Database:
         except sqlite3.Error as e:
             print(f"데이터베이스 초기화 중 오류 발생: {e}")
 
+    def get_product_by_udi(self, udi: str) -> Optional[Dict[str, Any]]:
+        """UDI 번호로 등록된 제품이 있는지 즉시 확인합니다."""
+        query = "SELECT * FROM products WHERE udi = ?"
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(query, (udi,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.Error:
+            return None
+
     def upsert_product(self, data: Dict[str, Any]) -> bool:
-        """
-        제품 정보를 저장하거나, 이미 존재하는 경우 업데이트합니다.
-        (UDI 번호가 중복되면 기존 정보를 갱신하고 수량을 더합니다.)
-        """
+        """제품 정보를 저장하거나 업데이트합니다."""
         now = datetime.now().isoformat()
         query = """
             INSERT INTO products (
@@ -81,14 +88,12 @@ class Database:
             return False
 
     def list_products(self, search: str = "") -> List[Dict[str, Any]]:
-        """저장된 전체 제품 목록을 조회합니다. 검색어가 있으면 필터링합니다."""
+        """제품 목록 조회"""
         query = "SELECT * FROM products"
         params = ()
-        
         if search:
             query += " WHERE name LIKE ? OR udi LIKE ? OR lot LIKE ?"
             params = (f"%{search}%", f"%{search}%", f"%{search}%")
-        
         try:
             with self._get_connection() as conn:
                 cursor = conn.execute(query, params)
@@ -97,31 +102,18 @@ class Database:
             return []
 
     def get_expiring_products(self, days: int = 30) -> Dict[str, List[Dict[str, Any]]]:
-        """유통기한이 지났거나 임박한 제품들을 분류하여 반환합니다."""
+        """유통기한 확인"""
         today = datetime.now().date().isoformat()
-        
         try:
             with self._get_connection() as conn:
-                # 1. 유통기한 만료 제품
-                expired = conn.execute(
-                    "SELECT * FROM products WHERE expire_date < ?", (today,)
-                ).fetchall()
-                
-                # 2. 유통기한 임박 제품 (현재부터 N일 이내)
-                expiring = conn.execute(
-                    "SELECT * FROM products WHERE expire_date >= ? AND expire_date <= date('now', ?)",
-                    (today, f'+{days} days')
-                ).fetchall()
-                
-                return {
-                    "expired": [dict(row) for row in expired],
-                    "expiring": [dict(row) for row in expiring]
-                }
+                expired = conn.execute("SELECT * FROM products WHERE expire_date < ?", (today,)).fetchall()
+                expiring = conn.execute("SELECT * FROM products WHERE expire_date >= ? AND expire_date <= date('now', ?)", (today, f'+{days} days')).fetchall()
+                return {"expired": [dict(row) for row in expired], "expiring": [dict(row) for row in expiring]}
         except sqlite3.Error:
             return {"expired": [], "expiring": []}
 
     def delete_product(self, product_id: int) -> bool:
-        """지정한 ID의 제품을 삭제합니다."""
+        """제품 삭제"""
         try:
             with self._get_connection() as conn:
                 conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
