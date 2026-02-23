@@ -6,11 +6,11 @@ from typing import Dict, Optional, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# 엑셀 기능을 위한 openpyxl (설치되어 있지 않으면 None 처리)
+# 엑셀 기능을 위한 pandas (설치되어 있지 않으면 None 처리)
 try:
-    from openpyxl import load_workbook
+    import pandas as pd
 except ImportError:
-    load_workbook = None
+    pd = None
 
 load_dotenv()
 
@@ -27,46 +27,51 @@ class ExcelProvider(BaseProvider):
         self._load_excel()
 
     def _load_excel(self):
-        if not load_workbook:
-            sys.stderr.write("openpyxl 라이브러리가 없어 엑셀 기능을 사용할 수 없습니다.\n")
+        if pd is None:
+            sys.stderr.write("pandas 라이브러리가 없어 엑셀 기능을 사용할 수 없습니다.\n")
             return
 
         try:
-            # data_only=True: 수식 대신 계산된 값을 읽어옴
-            wb = load_workbook(self.file_path, data_only=True)
-            ws = wb.active
-            
-            # 헤더 찾기 (1행 가정)
-            header = [str(cell.value).strip() if cell.value else "" for cell in ws[1]]
+            # pandas를 사용하여 엑셀 파일 읽기 (스타일 무시, 값만 읽음)
+            # engine='openpyxl'을 명시적으로 지정하되, pandas가 내부적으로 오류를 잘 처리함
+            # dtype={'바코드': str}: 바코드 열을 문자열로 읽도록 강제 (매우 중요!)
+            # 하지만 컬럼 이름을 모르니 일단 다 읽고 처리해야 함.
+            df = pd.read_excel(self.file_path, dtype=str)
             
             # 헤더 매핑 (대소문자 무시, 한글 지원)
-            col_map = {h.upper(): i for i, h in enumerate(header) if h}
+            # 컬럼 이름의 공백 제거
+            df.columns = [str(col).strip() for col in df.columns]
+            col_map = {str(col).upper(): col for col in df.columns}
             
-            # 필요한 열 인덱스 찾기
-            idx_gtin = col_map.get('GTIN') or col_map.get('바코드')
-            idx_name = col_map.get('NAME') or col_map.get('품명') or col_map.get('제품명')
-            # '규격', '재고'는 현재 사용하지 않음
+            # 필요한 열 이름 찾기
+            col_gtin = col_map.get('GTIN') or col_map.get('바코드')
+            col_name = col_map.get('NAME') or col_map.get('품명') or col_map.get('제품명')
             
-            if idx_gtin is None:
+            if not col_gtin:
                 sys.stderr.write(f"엑셀 파일({self.file_path})에 '바코드' 또는 'GTIN' 열이 없습니다.\n")
                 return
 
             # 데이터 로드
             count = 0
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                # 바코드 읽기 (문자열로 변환)
-                gtin_raw = row[idx_gtin]
-                if not gtin_raw: continue
+            for _, row in df.iterrows():
+                gtin_raw = row[col_gtin]
+                if pd.isna(gtin_raw) or str(gtin_raw).strip() == "":
+                    continue
                 
-                # 엑셀에 있는 바코드를 문자열로 변환 (공백 제거)
-                # 정수형일 경우 str()로 변환됨 (예: 880123... -> "880123...")
+                # 바코드 문자열 변환 (소수점 제거 등)
                 gtin = str(gtin_raw).strip()
+                # 엑셀에서 숫자로 읽혀서 '880...0.0' 처럼 될 수 있음 -> 정수부만 취함
+                if '.' in gtin:
+                    try:
+                        gtin = str(int(float(gtin)))
+                    except: pass
                 
                 # 품명 읽기
-                name_raw = row[idx_name] if idx_name is not None else ""
-                full_name = str(name_raw).strip() if name_raw else "Unknown Product"
+                if col_name and not pd.isna(row[col_name]):
+                    full_name = str(row[col_name]).strip()
+                else:
+                    full_name = "Unknown Product"
                 
-                # 품명에서 도수 분리
                 name, power = self._parse_name_and_power(full_name)
                 
                 self.data_cache[gtin] = {
@@ -75,10 +80,10 @@ class ExcelProvider(BaseProvider):
                 }
                 count += 1
             
-            print(f"[DEBUG] 엑셀 로드 완료: {count}개의 데이터가 캐시되었습니다.")
+            print(f"[DEBUG] 엑셀 로드 완료 (pandas): {count}개의 데이터가 캐시되었습니다.")
                 
         except Exception as e:
-            sys.stderr.write(f"엑셀 파일 로드 실패: {self.file_path} ({e})\n")
+            sys.stderr.write(f"엑셀 파일 로드 실패 (pandas): {self.file_path} ({e})\n")
 
     def _parse_name_and_power(self, full_name: str) -> tuple[str, str]:
         """
