@@ -32,39 +32,65 @@ class ExcelProvider(BaseProvider):
             return
 
         try:
+            # data_only=True: 수식 대신 계산된 값을 읽어옴
             wb = load_workbook(self.file_path, data_only=True)
             ws = wb.active
             
-            # 헤더 찾기 (GTIN, NAME, POWER 열의 인덱스 확인)
-            header = [cell.value for cell in ws[1]]
-            try:
-                # 대소문자 무시하고 열 이름 찾기
-                col_map = {str(h).upper(): i for i, h in enumerate(header) if h}
-                idx_gtin = col_map.get('GTIN')
-                idx_name = col_map.get('NAME') or col_map.get('PRODUCT_NAME')
-                idx_power = col_map.get('POWER') or col_map.get('Diopter')
-                
-                if idx_gtin is None:
-                    sys.stderr.write("엑셀 파일에 'GTIN' 열이 없습니다.\n")
-                    return
+            # 헤더 찾기 (1행 가정)
+            header = [str(cell.value).strip() if cell.value else "" for cell in ws[1]]
+            
+            # 헤더 매핑 (대소문자 무시, 한글 지원)
+            col_map = {h.upper(): i for i, h in enumerate(header) if h}
+            
+            # 필요한 열 인덱스 찾기
+            idx_gtin = col_map.get('GTIN') or col_map.get('바코드')
+            idx_name = col_map.get('NAME') or col_map.get('품명') or col_map.get('제품명')
+            # '규격', '재고'는 현재 사용하지 않음
+            
+            if idx_gtin is None:
+                sys.stderr.write(f"엑셀 파일({self.file_path})에 '바코드' 또는 'GTIN' 열이 없습니다.\n")
+                return
 
-                # 데이터 로드
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    gtin = str(row[idx_gtin]).strip()
-                    if not gtin: continue
-                    
-                    name = row[idx_name] if idx_name is not None else "Unknown Product"
-                    power = row[idx_power] if idx_power is not None else "N/A"
-                    
-                    self.data_cache[gtin] = {
-                        "name": str(name).strip(),
-                        "power": str(power).strip()
-                    }
-            except Exception as e:
-                sys.stderr.write(f"엑셀 데이터 파싱 중 오류: {e}\n")
+            # 데이터 로드
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                # 바코드 읽기 (문자열로 변환)
+                gtin_raw = row[idx_gtin]
+                if not gtin_raw: continue
+                gtin = str(gtin_raw).strip()
+                
+                # 품명 읽기
+                name_raw = row[idx_name] if idx_name is not None else ""
+                full_name = str(name_raw).strip() if name_raw else "Unknown Product"
+                
+                # 품명에서 도수 분리
+                name, power = self._parse_name_and_power(full_name)
+                
+                self.data_cache[gtin] = {
+                    "name": name,
+                    "power": power
+                }
                 
         except Exception as e:
             sys.stderr.write(f"엑셀 파일 로드 실패: {self.file_path} ({e})\n")
+
+    def _parse_name_and_power(self, full_name: str) -> tuple[str, str]:
+        """
+        품명 문자열에서 도수를 추출합니다.
+        예: "바이오피니티 -3.00" -> ("바이오피니티", "-3.00")
+        예: "아큐브 오아시스 +1.25" -> ("아큐브 오아시스", "+1.25")
+        """
+        # 도수 패턴: + 또는 - 부호가 있거나 없으며, 숫자.숫자 형식 (예: -3.00, +1.25, 0.00)
+        # 또는 단순 정수형 도수 (예: -3, +2)
+        power_pattern = r'([+-]?\d+\.\d{2}|[+-]?\d+\.\d+|[+-]\d+)'
+        
+        match = re.search(power_pattern, full_name)
+        if match:
+            power = match.group(1)
+            # 도수를 제외한 나머지 문자열을 제품명으로 사용
+            name = full_name.replace(power, "").strip().strip("-_, ")
+            return name, power
+        
+        return full_name, "N/A"
 
     def fetch(self, gtin: str) -> Optional[Dict[str, Any]]:
         return self.data_cache.get(gtin)
@@ -118,7 +144,8 @@ class APIClient:
         self.providers: List[BaseProvider] = []
         
         # 1. 엑셀 파일 우선 검색 (LENS_EXCEL_PATH 환경변수 사용)
-        excel_path = os.getenv("LENS_EXCEL_PATH", "").strip()
+        # 기본값으로 'product_list.xlsx'도 확인하도록 수정
+        excel_path = os.getenv("LENS_EXCEL_PATH", "product_list.xlsx").strip()
         if excel_path and os.path.exists(excel_path):
             self.providers.append(ExcelProvider(excel_path))
         
