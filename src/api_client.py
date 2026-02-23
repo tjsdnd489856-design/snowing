@@ -52,6 +52,7 @@ class ExcelProvider(BaseProvider):
                 return
 
             # 데이터 로드
+            count = 0
             for row in ws.iter_rows(min_row=2, values_only=True):
                 # 바코드 읽기 (문자열로 변환)
                 gtin_raw = row[idx_gtin]
@@ -72,6 +73,9 @@ class ExcelProvider(BaseProvider):
                     "name": name,
                     "power": power
                 }
+                count += 1
+            
+            print(f"[DEBUG] 엑셀 로드 완료: {count}개의 데이터가 캐시되었습니다.")
                 
         except Exception as e:
             sys.stderr.write(f"엑셀 파일 로드 실패: {self.file_path} ({e})\n")
@@ -97,16 +101,23 @@ class ExcelProvider(BaseProvider):
 
     def fetch(self, gtin: str) -> Optional[Dict[str, Any]]:
         # 1. 있는 그대로 검색 (14자리 또는 13자리)
+        print(f"[DEBUG] 엑셀 검색 시도 (원본): {gtin}")
         data = self.data_cache.get(gtin)
         if data:
+            print(f"[DEBUG] 엑셀 검색 성공 (원본): {data['name']}")
             return data
             
         # 2. 만약 입력된 바코드가 14자리이고 0으로 시작하면, 13자리로 변환해서 재검색
         # (엑셀에는 13자리로 저장되어 있을 가능성이 높음)
         if len(gtin) == 14 and gtin.startswith('0'):
             gtin_13 = gtin[1:]
-            return self.data_cache.get(gtin_13)
+            print(f"[DEBUG] 엑셀 재검색 시도 (13자리): {gtin_13}")
+            data = self.data_cache.get(gtin_13)
+            if data:
+                print(f"[DEBUG] 엑셀 검색 성공 (13자리): {data['name']}")
+                return data
             
+        print("[DEBUG] 엑셀 검색 실패: 데이터 없음")
         return None
 
 class MFDSProvider(BaseProvider):
@@ -161,7 +172,10 @@ class APIClient:
         # 기본값으로 'product_list.xlsx'도 확인하도록 수정
         excel_path = os.getenv("LENS_EXCEL_PATH", "product_list.xlsx").strip()
         if excel_path and os.path.exists(excel_path):
+            print(f"[DEBUG] 엑셀 파일 로드 시도: {excel_path}")
             self.providers.append(ExcelProvider(excel_path))
+        else:
+            print(f"[DEBUG] 엑셀 파일을 찾을 수 없음: {excel_path}")
         
         # 2. 식약처 API 검색
         mfds_key = os.getenv("LENS_API_KEY", "").strip()

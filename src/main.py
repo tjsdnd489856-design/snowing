@@ -41,6 +41,9 @@ class LensApp:
                 raw_barcode = self.parser.read_from_image(input_data)
                 if not raw_barcode: continue
 
+            # [DEBUG] 입력값 확인
+            self.ui.console.print(f"[dim]입력된 바코드: {raw_barcode}[/dim]")
+
             existing_product = self.db.get_product_by_udi(raw_barcode)
             if existing_product:
                 self.ui.show_message(f"이미 등록된 제품입니다: {existing_product['name']}", "success")
@@ -50,11 +53,23 @@ class LensApp:
                 continue
 
             parsed_data = self.parser.process_scanner_input(raw_barcode)
+            
+            # [DEBUG] 파싱 결과 출력
+            self.ui.console.print(f"[yellow][DEBUG] 파싱 결과: GTIN={parsed_data.get('gtin')}, 날짜={parsed_data.get('expire_date')}, LOT={parsed_data.get('lot')}[/yellow]")
+
             if parsed_data.get('gtin'):
+                self.ui.console.print(f"[cyan]제품 정보 검색 중... (GTIN: {parsed_data['gtin']})[/cyan]")
                 api_info = self.api.fetch_product_info(parsed_data['gtin'])
+                
+                if api_info:
+                    self.ui.console.print(f"[green][DEBUG] 검색 성공: {api_info['name']} ({api_info.get('source', 'Unknown')})[/green]")
+                else:
+                    self.ui.console.print("[red][DEBUG] 검색 실패: 제품 정보를 찾을 수 없습니다.[/red]")
+
                 parsed_data = self.api.sync_with_local_db(api_info, parsed_data)
             
             if not parsed_data.get('name'):
+                self.ui.console.print("[bold red]제품명을 찾지 못했습니다. 수동으로 입력해주세요.[/bold red]")
                 manual_name = self.ui.get_input("제품명 수동 입력")
                 parsed_data['name'] = manual_name if manual_name else "미지정 제품"
 
