@@ -56,6 +56,9 @@ class ExcelProvider(BaseProvider):
                 # 바코드 읽기 (문자열로 변환)
                 gtin_raw = row[idx_gtin]
                 if not gtin_raw: continue
+                
+                # 엑셀에 있는 바코드를 문자열로 변환 (공백 제거)
+                # 정수형일 경우 str()로 변환됨 (예: 880123... -> "880123...")
                 gtin = str(gtin_raw).strip()
                 
                 # 품명 읽기
@@ -93,7 +96,18 @@ class ExcelProvider(BaseProvider):
         return full_name, "N/A"
 
     def fetch(self, gtin: str) -> Optional[Dict[str, Any]]:
-        return self.data_cache.get(gtin)
+        # 1. 있는 그대로 검색 (14자리 또는 13자리)
+        data = self.data_cache.get(gtin)
+        if data:
+            return data
+            
+        # 2. 만약 입력된 바코드가 14자리이고 0으로 시작하면, 13자리로 변환해서 재검색
+        # (엑셀에는 13자리로 저장되어 있을 가능성이 높음)
+        if len(gtin) == 14 and gtin.startswith('0'):
+            gtin_13 = gtin[1:]
+            return self.data_cache.get(gtin_13)
+            
+        return None
 
 class MFDSProvider(BaseProvider):
     """[식약처 API 공급자] 병렬 호출을 사용하여 속도를 극대화합니다."""

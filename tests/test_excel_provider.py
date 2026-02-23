@@ -15,10 +15,10 @@ def excel_file():
     ws.append(["바코드", "품명", "규격", "재고"])
     
     # 데이터 추가 (품명에 도수가 포함됨)
+    # 바코드는 13자리로 입력 (엑셀 상황 재현)
     ws.append(["8801234567890", "바이오피니티 -3.00", "규격A", 100])
     ws.append(["8809876543210", "아큐브 오아시스 +1.25", "규격B", 50])
     ws.append(["1234567890123", "일반 렌즈 (도수 없음)", "규격C", 0])
-    ws.append(["1111222233334", "난시용 -4.50", "규격D", 20])
     
     wb.save(TEST_EXCEL_PATH)
     yield TEST_EXCEL_PATH
@@ -50,15 +50,18 @@ def test_excel_provider_parse_power(excel_file):
     
     # 3. 도수 없음
     res3 = provider.fetch("1234567890123")
-    # 도수가 없으면 전체를 이름으로 쓰고, 도수는 N/A
     assert "일반 렌즈" in res3['name']
     assert res3['power'] == "N/A"
 
-def test_excel_provider_mixed_format(excel_file):
-    """복잡한 형식의 도수 추출"""
+def test_excel_provider_13_digit_lookup(excel_file):
+    """14자리 스캔 코드로 13자리 엑셀 데이터 검색 테스트"""
     provider = ExcelProvider(excel_file)
-    # 정규식 패턴 테스트를 위해 직접 메서드 호출해보기
     
-    # 케이스 1: 괄호 안에 도수가 있는 경우 (현재 로직으로는 단순 숫자 패턴만 찾음)
-    # 필요하다면 로직을 더 정교하게 수정해야 함.
-    pass 
+    # 엑셀에는 '8801234567890' (13자리) 저장됨
+    # 스캐너 입력은 '08801234567890' (14자리 - 보통 GS1-128 파싱 결과)
+    input_gtin = "08801234567890"
+    
+    result = provider.fetch(input_gtin)
+    
+    assert result is not None, "14자리 코드로 13자리 엑셀 데이터를 찾지 못했습니다."
+    assert result['name'].strip() == "바이오피니티"
