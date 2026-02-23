@@ -23,13 +23,19 @@ class LensManagerApp:
         self.root = tk.Tk()
         self.root.overrideredirect(True) # 타이틀바 제거
         self.root.attributes('-topmost', True) # 항상 위에 표시
-        # 높이를 버튼 3개 분량으로 확장 (60 -> 160)
-        self.root.geometry("250x160+10+10") 
+        # 레이아웃 변경: 좌측(알림, 세로로 긴 형태) / 우측(입고 및 판매 버튼)
+        self.root.geometry("380x120+10+10") 
         self.root.configure(bg='black')
+
+        # 그리드 가중치 설정 (버튼들이 영역을 꽉 채우도록 함)
+        self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(1, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
         # --- 버튼 스타일 및 배치 ---
         
-        # [1] 유통기한 알림 버튼 (상단)
+        # [1] 유통기한 알림 버튼 (좌측 - 2개의 행을 합쳐서 세로 길이를 2배로 만듦)
         self.alert_btn = tk.Button(
             self.root, 
             text="⏳ 로딩 중...", 
@@ -39,31 +45,31 @@ class LensManagerApp:
             relief="flat",
             command=self.show_expiring_list
         )
-        self.alert_btn.pack(fill="x", padx=2, pady=(2, 1))
+        self.alert_btn.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=2, pady=2)
 
-        # [2] 입고(Insert) 버튼 (중간)
+        # [2] 입고(Insert) 버튼 (우측 상단)
         self.insert_btn = tk.Button(
             self.root,
             text="📥 입고 (Insert)",
-            font=("Malgun Gothic", 11, "bold"),
+            font=("Malgun Gothic", 10, "bold"),
             bg="#2e7d32", fg="white", # 녹색 계열
             activebackground="#1b5e20", activeforeground="white",
             relief="flat",
             command=self.open_scan_window
         )
-        self.insert_btn.pack(fill="x", padx=2, pady=1)
+        self.insert_btn.grid(row=0, column=1, sticky="nsew", padx=2, pady=(2, 1))
 
-        # [3] 판매(Home) 버튼 (하단)
+        # [3] 판매(Home) 버튼 (우측 하단 - 입고 버튼과 같은 열)
         self.home_btn = tk.Button(
             self.root,
             text="📤 판매 (Home)",
-            font=("Malgun Gothic", 11, "bold"),
+            font=("Malgun Gothic", 10, "bold"),
             bg="#1565c0", fg="white", # 청색 계열
             activebackground="#0d47a1", activeforeground="white",
             relief="flat",
             command=self.open_delete_window
         )
-        self.home_btn.pack(fill="x", padx=2, pady=(1, 2))
+        self.home_btn.grid(row=1, column=1, sticky="nsew", padx=2, pady=(1, 2))
 
         # 3. 시스템 트레이 아이콘
         try:
@@ -77,9 +83,13 @@ class LensManagerApp:
             print(f"아이콘 로드 오류: {e}")
             self.icon = None
         
-        # 4. 글로벌 단축키 설정
-        keyboard.add_hotkey('insert', self.open_scan_window)
-        keyboard.add_hotkey('home', self.open_delete_window)
+        # 4. 글로벌 단축키 설정 (강력한 글로벌 반응성 확보)
+        # suppress=True를 설정하여 다른 앱에 키가 입력되는 것을 방지합니다.
+        try:
+            keyboard.add_hotkey('insert', self.open_scan_window, suppress=True)
+            keyboard.add_hotkey('home', self.open_delete_window, suppress=True)
+        except Exception as e:
+            print(f"단축키 등록 오류: {e}")
         
         # 5. 주기적 작업 시작
         self.check_expiry()
@@ -95,6 +105,17 @@ class LensManagerApp:
         except KeyboardInterrupt:
             self.quit_app()
 
+    def center_window(self, win, width, height):
+        """윈도우를 화면 중앙에 배치하고 최상단으로 올립니다."""
+        screen_width = win.winfo_screenwidth()
+        screen_height = win.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+
     def check_expiry(self):
         """1분마다 유통기한 상태 확인 및 버튼 색상 변경"""
         if not self.running: return
@@ -108,7 +129,7 @@ class LensManagerApp:
             
             if total_alert > 0:
                 self.alert_btn.config(
-                    text=f"⚠️ 유통기한 임박 ({total_alert}건)", 
+                    text=f"⚠️ 유통기한 임박\n({total_alert}건)", 
                     bg="#d32f2f", fg="white", # 경고색 (빨간색)
                     activebackground="#b71c1c", activeforeground="white"
                 )
@@ -128,6 +149,8 @@ class LensManagerApp:
     def show_main_window(self, icon=None, item=None):
         """메인 윈도우(리스트 등)를 보여줍니다. (추후 구현)"""
         self.root.deiconify() 
+        self.root.lift()
+        self.root.focus_force()
         messagebox.showinfo("알림", "메인 창 기능은 아직 구현 중입니다.")
 
     def open_scan_window(self):
@@ -137,7 +160,7 @@ class LensManagerApp:
     def _create_scan_window(self):
         scan_win = tk.Toplevel(self.root)
         scan_win.title("📦 재고 추가 (바코드 스캔)")
-        scan_win.geometry("500x200")
+        self.center_window(scan_win, 500, 200) # 화면 중앙 배치 및 강제 포커스
         scan_win.attributes('-topmost', True)
         
         lbl = tk.Label(scan_win, text="바코드를 스캔하세요 (Insert 키)", font=("Malgun Gothic", 12))
@@ -145,7 +168,9 @@ class LensManagerApp:
         
         entry = tk.Entry(scan_win, font=("Arial", 16), justify='center')
         entry.pack(pady=5, fill='x', padx=50)
-        entry.focus_set()
+        
+        # 창이 뜨자마자 입력창에 커서가 가도록 설정 (지연 시간을 주어 더 확실하게 처리)
+        scan_win.after(100, lambda: entry.focus_force())
 
         result_lbl = tk.Label(scan_win, text="대기 중...", font=("Malgun Gothic", 10), fg="gray")
         result_lbl.pack(pady=10)
@@ -193,7 +218,7 @@ class LensManagerApp:
     def _create_delete_window(self):
         del_win = tk.Toplevel(self.root)
         del_win.title("🗑️ 재고 삭제")
-        del_win.geometry("400x150")
+        self.center_window(del_win, 400, 150) # 화면 중앙 배치 및 강제 포커스
         del_win.attributes('-topmost', True)
         
         lbl = tk.Label(del_win, text="삭제할 제품 ID 입력 (Home 키)", font=("Malgun Gothic", 12))
@@ -201,7 +226,9 @@ class LensManagerApp:
         
         entry = tk.Entry(del_win, font=("Arial", 14), justify='center')
         entry.pack(pady=5)
-        entry.focus_set()
+        
+        # 창이 뜨자마자 입력창에 커서가 가도록 설정
+        del_win.after(100, lambda: entry.focus_force())
 
         def on_delete(event=None):
             pid = entry.get().strip()
@@ -226,7 +253,7 @@ class LensManagerApp:
         """[버튼 클릭] 유통기한 임박 목록을 보여줍니다."""
         list_win = tk.Toplevel(self.root)
         list_win.title("⚠️ 유통기한 임박 제품 목록")
-        list_win.geometry("750x450")
+        self.center_window(list_win, 750, 450) # 목록 창도 중앙 배치 및 강제 포커스
         list_win.attributes('-topmost', True)
         
         cols = ("ID", "제품명", "도수", "유통기한", "남은 일수", "상태")

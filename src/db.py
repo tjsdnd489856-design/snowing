@@ -111,26 +111,59 @@ class Database:
         except sqlite3.Error:
             return []
 
-    def get_expiring_products(self, days: int = 30) -> Dict[str, List[Dict[str, Any]]]:
-        """유통기한 상태 확인"""
-        today = datetime.now().date().isoformat()
-        future_date_query = f"date('now', '+{days} days')"
+    def get_expiring_products(self, days: int = 90) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        유통기한 상태 확인 (제품별 차등 적용)
+        - 기본: 3개월(90일) 이내
+        - 특정 제품(클래리티, 토탈원, 피니티, 프로클리어): 9개월(270일) 이내
+        """
+        today = datetime.now().date()
+        expired = []
+        expiring = []
         
+        # 특정 제품 키워드 (오래 남았어도 빨리 팔아야 하는 제품들)
+        long_term_keywords = ["클래리티", "토탈원", "피니티", "프로클리어"]
+        long_term_days = 270 # 9개월 (약 270일)
+
         try:
-            expired = self.conn.execute(
-                "SELECT * FROM products WHERE expire_date < ?", 
-                (today,)
-            ).fetchall()
+            # 모든 제품을 가져와서 파이썬에서 필터링 (복잡한 조건 처리 위함)
+            with self.conn:
+                cursor = self.conn.execute("SELECT * FROM products")
+                all_products = [dict(row) for row in cursor.fetchall()]
+
+            for p in all_products:
+                try:
+                    expire_str = p['expire_date']
+                    if not expire_str or expire_str == '9999-12-31':
+                        continue
+                        
+                    expire_date = datetime.strptime(expire_str, "%Y-%m-%d").date()
+                    days_left = (expire_date - today).days
+                    
+                    if days_left < 0:
+                        p['days_left'] = days_left
+                        expired.append(p)
+                        continue
+                    
+                    # 제품명 확인
+                    name = p['name'] or ""
+                    # 키워드가 하나라도 포함되어 있는지 확인
+                    is_long_term = any(k in name for k in long_term_keywords)
+                    
+                    limit_days = long_term_days if is_long_term else days
+                    
+                    if days_left <= limit_days:
+                        p['days_left'] = days_left # 남은 일수 추가 정보
+                        expiring.append(p)
+
+                except (ValueError, TypeError):
+                    continue # 날짜 형식이 이상하면 무시
+
+            # 남은 일수 순으로 정렬 (급한 것부터)
+            expiring.sort(key=lambda x: x['days_left'])
             
-            expiring = self.conn.execute(
-                f"SELECT * FROM products WHERE expire_date >= ? AND expire_date <= {future_date_query}", 
-                (today,)
-            ).fetchall()
+            return {"expired": expired, "expiring": expiring}
             
-            return {
-                "expired": [dict(row) for row in expired], 
-                "expiring": [dict(row) for row in expiring]
-            }
         except sqlite3.Error as e:
             sys.stderr.write(f"유통기한 조회 중 오류 발생: {e}\n")
             return {"expired": [], "expiring": []}

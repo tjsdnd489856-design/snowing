@@ -7,3 +7,6 @@ pytest-mock
 rich
 openpyxl
 pandas
+keyboard
+pystray
+Pillow
