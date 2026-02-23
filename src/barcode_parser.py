@@ -51,10 +51,20 @@ class BarcodeParser:
 
         v = match.group(1)
         try:
-            year, month, day = int(v[0:2]) + 2000, int(v[2:4]), int(v[4:6])
-            if day == 0: day = calendar.monthrange(year, month)[1]
-            return f"{year}-{month:02d}-{day:02d}"
-        except: return "9999-12-31"
+            year = int(v[0:2]) + 2000
+            month = int(v[2:4])
+            day = int(v[4:6])
+
+            # 날짜 유효성 검사: day가 0인 경우 월의 마지막 날로 설정
+            if day == 0:
+                day = calendar.monthrange(year, month)[1]
+            
+            # datetime 객체 생성을 통해 유효성 검증 (예: 13월, 32일 등 체크)
+            valid_date = datetime(year, month, day)
+            return valid_date.strftime("%Y-%m-%d")
+        except (ValueError, IndexError):
+            # 날짜 형식이 올바르지 않으면 기본값 반환
+            return "9999-12-31"
 
     def _extract_lot(self, text: str) -> str:
         """AI 10: 로트번호 추출"""
@@ -67,5 +77,13 @@ class BarcodeParser:
         match = re.search(r'11(\d{6})', text)
         if not match: return ""
         v = match.group(1)
-        try: return f"20{v[0:2]}-{v[2:4]}-{v[4:6]}"
-        except: return ""
+        try:
+            year = int(v[0:2]) + 2000
+            month = int(v[2:4])
+            day = int(v[4:6])
+            
+            # datetime 객체 생성을 통해 유효성 검증
+            valid_date = datetime(year, month, day)
+            return valid_date.strftime("%Y-%m-%d")
+        except (ValueError, IndexError):
+            return ""
