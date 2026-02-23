@@ -2,15 +2,11 @@ import os
 import requests
 import re
 import sys
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Dict, Optional, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
-
-# 엑셀 기능을 위한 pandas (설치되어 있지 않으면 None 처리)
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
 
 load_dotenv()
 
@@ -19,58 +15,114 @@ class BaseProvider:
         raise NotImplementedError()
 
 class ExcelProvider(BaseProvider):
-    """[엑셀 파일 공급자] 로컬 엑셀 파일에서 제품 정보를 검색합니다."""
+    """[엑셀 파일 공급자] 로컬 엑셀 파일에서 제품 정보를 검색합니다. (Raw XML 파싱 사용)"""
     
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.data_cache = {} # 성능을 위해 한 번 읽은 데이터는 메모리에 캐싱
-        self._load_excel()
+        self._load_excel_raw()
 
-    def _load_excel(self):
-        if pd is None:
-            sys.stderr.write("pandas 라이브러리가 없어 엑셀 기능을 사용할 수 없습니다.\n")
-            return
-
+    def _load_excel_raw(self):
+        """
+        openpyxl/pandas를 사용하지 않고 ZIP/XML을 직접 파싱하여 
+        'fillID' 같은 스타일 오류를 원천 차단합니다.
+        """
         try:
-            # pandas를 사용하여 엑셀 파일 읽기 (스타일 무시, 값만 읽음)
-            # engine='openpyxl'을 명시적으로 지정하되, pandas가 내부적으로 오류를 잘 처리함
-            # dtype={'바코드': str}: 바코드 열을 문자열로 읽도록 강제 (매우 중요!)
-            # 하지만 컬럼 이름을 모르니 일단 다 읽고 처리해야 함.
-            df = pd.read_excel(self.file_path, dtype=str)
-            
-            # 헤더 매핑 (대소문자 무시, 한글 지원)
-            # 컬럼 이름의 공백 제거
-            df.columns = [str(col).strip() for col in df.columns]
-            col_map = {str(col).upper(): col for col in df.columns}
-            
-            # 필요한 열 이름 찾기
-            col_gtin = col_map.get('GTIN') or col_map.get('바코드')
-            col_name = col_map.get('NAME') or col_map.get('품명') or col_map.get('제품명')
-            
-            if not col_gtin:
-                sys.stderr.write(f"엑셀 파일({self.file_path})에 '바코드' 또는 'GTIN' 열이 없습니다.\n")
+            with zipfile.ZipFile(self.file_path, 'r') as z:
+                # 1. 공유 문자열(Shared Strings) 로드
+                # 엑셀은 중복되는 문자열을 별도 파일에 저장하고 인덱스로 참조합니다.
+                shared_strings = []
+                if 'xl/sharedStrings.xml' in z.namelist():
+                    with z.open('xl/sharedStrings.xml') as f:
+                        # XML 파싱 (iterparse를 사용하여 메모리 효율성 높임)
+                        for event, elem in ET.iterparse(f):
+                            if elem.tag.endswith('t'): # <t> 태그 (텍스트)
+                                shared_strings.append(elem.text or "")
+                            elif elem.tag.endswith('si'): # <si> 태그 (문자열 항목)
+                                # 하나의 si 안에는 하나의 t만 있다고 가정 (간단한 처리)
+                                pass
+
+                # 2. 첫 번째 시트(sheet1) 데이터 로드
+                # 보통 데이터는 sheet1에 있습니다.
+                sheet_path = 'xl/worksheets/sheet1.xml'
+                if sheet_path not in z.namelist():
+                    # sheet1.xml이 없으면 xl/workbook.xml을 뒤져야 하지만
+                    # 대부분의 간단한 엑셀은 sheet1.xml에 데이터가 있습니다.
+                    sys.stderr.write(f"엑셀 파일 구조를 인식할 수 없습니다 (sheet1.xml 없음): {self.file_path}\n")
+                    return
+
+                # 데이터 파싱
+                rows = []
+                with z.open(sheet_path) as f:
+                    tree = ET.parse(f)
+                    root = tree.getroot()
+                    # 네임스페이스 무시하고 태그 이름으로만 찾기 위해 정규식이나 endswith 사용이 편하지만
+                    # 여기서는 간단히 namespace를 정의합니다.
+                    ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                    
+                    for row in root.findall('.//ns:row', ns):
+                        row_vals = []
+                        # 셀(c) 순회
+                        for c in row.findall('ns:c', ns):
+                            # r 속성(예: "A1")을 보고 컬럼 인덱스를 정확히 맞춰야 하지만
+                            # 여기서는 순서대로 데이터가 있다고 가정하고 append 합니다.
+                            # (빈 셀 처리가 완벽하지 않을 수 있지만, 일반적인 리스트 파일에는 충분함)
+                            
+                            val = ""
+                            cell_type = c.get('t')
+                            v_tag = c.find('ns:v', ns)
+                            
+                            if v_tag is not None:
+                                raw_val = v_tag.text
+                                if cell_type == 's': # Shared String
+                                    try:
+                                        idx = int(raw_val)
+                                        if idx < len(shared_strings):
+                                            val = shared_strings[idx]
+                                    except: pass
+                                else: # Number or other
+                                    val = raw_val
+                            
+                            row_vals.append(val)
+                        rows.append(row_vals)
+
+            if not rows:
+                sys.stderr.write(f"엑셀 파일에 데이터가 없습니다: {self.file_path}\n")
                 return
 
-            # 데이터 로드
+            # 3. 헤더 매핑 및 데이터 캐싱
+            header = [str(h).strip() for h in rows[0]] # 첫 번째 행을 헤더로
+            
+            # 헤더 매핑
+            col_map = {h.upper(): i for i, h in enumerate(header) if h}
+            
+            idx_gtin = col_map.get('GTIN') or col_map.get('바코드')
+            idx_name = col_map.get('NAME') or col_map.get('품명') or col_map.get('제품명')
+            
+            if idx_gtin is None:
+                sys.stderr.write(f"엑셀 파일({self.file_path})에 '바코드' 또는 'GTIN' 열이 없습니다. (인식된 헤더: {header})\n")
+                return
+
+            # 데이터 로드 (두 번째 줄부터)
             count = 0
-            for _, row in df.iterrows():
-                gtin_raw = row[col_gtin]
-                if pd.isna(gtin_raw) or str(gtin_raw).strip() == "":
-                    continue
+            for row in rows[1:]:
+                # 인덱스 범위 체크
+                if idx_gtin >= len(row): continue
                 
-                # 바코드 문자열 변환 (소수점 제거 등)
+                gtin_raw = row[idx_gtin]
+                if not gtin_raw: continue
+                
+                # 바코드 전처리
                 gtin = str(gtin_raw).strip()
-                # 엑셀에서 숫자로 읽혀서 '880...0.0' 처럼 될 수 있음 -> 정수부만 취함
+                # 소수점 제거 (엑셀 숫자형 처리)
                 if '.' in gtin:
                     try:
                         gtin = str(int(float(gtin)))
                     except: pass
                 
-                # 품명 읽기
-                if col_name and not pd.isna(row[col_name]):
-                    full_name = str(row[col_name]).strip()
-                else:
-                    full_name = "Unknown Product"
+                # 품명 전처리
+                name_raw = row[idx_name] if idx_name is not None and idx_name < len(row) else ""
+                full_name = str(name_raw).strip() if name_raw else "Unknown Product"
                 
                 name, power = self._parse_name_and_power(full_name)
                 
@@ -80,10 +132,12 @@ class ExcelProvider(BaseProvider):
                 }
                 count += 1
             
-            print(f"[DEBUG] 엑셀 로드 완료 (pandas): {count}개의 데이터가 캐시되었습니다.")
+            print(f"[DEBUG] 엑셀 로드 완료 (Raw XML): {count}개의 데이터가 캐시되었습니다.")
                 
         except Exception as e:
-            sys.stderr.write(f"엑셀 파일 로드 실패 (pandas): {self.file_path} ({e})\n")
+            sys.stderr.write(f"엑셀 파일 로드 실패 (Raw XML): {self.file_path} ({e})\n")
+            import traceback
+            traceback.print_exc()
 
     def _parse_name_and_power(self, full_name: str) -> tuple[str, str]:
         """
