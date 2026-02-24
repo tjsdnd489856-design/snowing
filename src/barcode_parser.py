@@ -12,12 +12,15 @@ class BarcodeParser:
 
     def process_scanner_input(self, input_str: str) -> Dict[str, Any]:
         """바코드 입력을 받아 각 항목별로 분해된 데이터를 반환합니다."""
+        # 한글 자판 입력 시 영문으로 변환
+        converted_str = self._convert_korean_to_english(input_str)
+        
         # 괄호와 공백 제거
-        clean_str = input_str.replace('(', '').replace(')', '').replace(' ', '').strip()
+        clean_str = converted_str.replace('(', '').replace(')', '').replace(' ', '').strip()
         
         # 결과 저장용 딕셔너리
         result = {
-            'udi': input_str,
+            'udi': converted_str,
             'gtin': '',
             'expire_date': '',
             'lot': 'N/A',
@@ -126,6 +129,24 @@ class BarcodeParser:
         except Exception as e:
             print(f"이미지 분석 중 오류 발생: {e}")
         return None
+
+    def _convert_korean_to_english(self, text: str) -> str:
+        """한글 자판 입력을 영문 자판 입력으로 변환합니다."""
+        korean_map = {
+            'ㅂ': 'q', 'ㅈ': 'w', 'ㄷ': 'e', 'ㄱ': 'r', 'ㅅ': 't',
+            'ㅛ': 'y', 'ㅕ': 'u', 'ㅑ': 'i', 'ㅐ': 'o', 'ㅔ': 'p',
+            'ㅁ': 'a', 'ㄴ': 's', 'ㅇ': 'd', 'ㄹ': 'f', 'ㅎ': 'g',
+            'ㅗ': 'h', 'ㅓ': 'j', 'ㅏ': 'k', 'ㅣ': 'l',
+            'ㅋ': 'z', 'ㅌ': 'x', 'ㅊ': 'c', 'ㅍ': 'v', 'ㅠ': 'b',
+            'ㅜ': 'n', 'ㅡ': 'm',
+            'ㅃ': 'Q', 'ㅉ': 'W', 'ㄸ': 'E', 'ㄲ': 'R', 'ㅆ': 'T',
+            'ㅒ': 'O', 'ㅖ': 'P'
+        }
+        
+        result = []
+        for char in text:
+            result.append(korean_map.get(char, char))
+        return "".join(result)
 
     def _parse_date(self, text: str, is_expiry: bool = False) -> str:
         """YYMMDD 형식의 문자열을 YYYY-MM-DD로 변환"""

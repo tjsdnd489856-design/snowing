@@ -3,6 +3,7 @@ from tkinter import messagebox, simpledialog, ttk
 import threading
 import time
 import sys
+import ctypes
 import pystray
 from PIL import Image
 from pystray import MenuItem as item
@@ -94,6 +95,20 @@ class LensManagerApp:
         # 5. 주기적 작업 시작
         self.check_expiry()
 
+    def _force_english_ime(self, widget):
+        """해당 위젯의 입력 모드를 영문으로 강제 전환합니다 (Windows 전용)."""
+        if sys.platform == 'win32':
+            try:
+                hwnd = widget.winfo_id()
+                imm32 = ctypes.windll.imm32
+                himc = imm32.ImmGetContext(hwnd)
+                if himc:
+                    # IME_CMODE_ALPHANUMERIC = 0x0
+                    imm32.ImmSetConversionStatus(himc, 0, 0)
+                    imm32.ImmReleaseContext(hwnd, himc)
+            except Exception:
+                pass
+
     def run(self):
         # 트레이 아이콘 실행 (별도 스레드)
         if self.icon:
@@ -170,7 +185,10 @@ class LensManagerApp:
         entry.pack(pady=5, fill='x', padx=50)
         
         # 창이 뜨자마자 입력창에 커서가 가도록 설정 (지연 시간을 주어 더 확실하게 처리)
+        # 동시에 한영 모드를 영문으로 강제 전환
+        entry.bind("<FocusIn>", lambda e: self._force_english_ime(entry))
         scan_win.after(100, lambda: entry.focus_force())
+        scan_win.after(150, lambda: self._force_english_ime(entry))
 
         result_lbl = tk.Label(scan_win, text="대기 중...", font=("Malgun Gothic", 10), fg="gray")
         result_lbl.pack(pady=10)
@@ -228,7 +246,10 @@ class LensManagerApp:
         entry.pack(pady=5)
         
         # 창이 뜨자마자 입력창에 커서가 가도록 설정
+        # 동시에 한영 모드를 영문으로 강제 전환
+        entry.bind("<FocusIn>", lambda e: self._force_english_ime(entry))
         del_win.after(100, lambda: entry.focus_force())
+        del_win.after(150, lambda: self._force_english_ime(entry))
 
         def on_delete(event=None):
             pid = entry.get().strip()
