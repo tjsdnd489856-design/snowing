@@ -168,6 +168,33 @@ class Database:
             sys.stderr.write(f"유통기한 조회 중 오류 발생: {e}\n")
             return {"expired": [], "expiring": []}
 
+    def decrement_stock_by_udi(self, udi: str) -> Dict[str, Any]:
+        """UDI에 해당하는 제품의 재고를 1 감소시킵니다."""
+        try:
+            # 제품 조회
+            cursor = self.conn.execute("SELECT * FROM products WHERE udi = ?", (udi,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return {'success': False, 'message': '제품을 찾을 수 없습니다.', 'product': None}
+            
+            product = dict(row)
+            new_qty = product['qty'] - 1
+            
+            with self.conn:
+                if new_qty <= 0:
+                    self.conn.execute("DELETE FROM products WHERE udi = ?", (udi,))
+                    msg = f"재고 소진으로 삭제됨: {product['name']}"
+                else:
+                    self.conn.execute("UPDATE products SET qty = ? WHERE udi = ?", (new_qty, udi))
+                    msg = f"재고 1 감소 (남은 수량: {new_qty}): {product['name']}"
+            
+            product['qty'] = new_qty # 결과 반환용 업데이트
+            return {'success': True, 'message': msg, 'product': product}
+            
+        except sqlite3.Error as e:
+            return {'success': False, 'message': f"DB 오류: {e}", 'product': None}
+
     def delete_product(self, product_id: int) -> bool:
         """제품 삭제"""
         try:

@@ -216,8 +216,19 @@ class LensManagerApp:
                         result_lbl.config(text="❌ 등록 취소됨 (제품명 없음)", fg="red")
                         return
 
+                # 도수 정보가 없는 경우 수동 입력 요청
+                if final_data.get('power') == 'N/A':
+                    manual_power = simpledialog.askstring("도수 입력", f"도수 정보를 찾을 수 없습니다.\n제품명: {final_data['name']}\n도수를 입력해주세요 (예: -3.50):", parent=scan_win)
+                    if manual_power:
+                        final_data['power'] = manual_power
+
                 if self.db.upsert_product(final_data):
-                    result_lbl.config(text=f"✅ 등록 완료!\n{final_data['name']}\n(유통기한: {final_data.get('expire_date')})", fg="green")
+                    success_msg = (
+                        f"✅ 등록 완료!\n"
+                        f"제품명: {final_data['name']}\n"
+                        f"도수: {final_data.get('power')} / 유통기한: {final_data.get('expire_date')}"
+                    )
+                    result_lbl.config(text=success_msg, fg="green")
                     # 유통기한 상태 즉시 갱신
                     self.check_expiry()
                 else:
@@ -235,15 +246,15 @@ class LensManagerApp:
 
     def _create_delete_window(self):
         del_win = tk.Toplevel(self.root)
-        del_win.title("🗑️ 재고 삭제")
-        self.center_window(del_win, 400, 150) # 화면 중앙 배치 및 강제 포커스
+        del_win.title("📤 판매 (재고 차감)")
+        self.center_window(del_win, 500, 200) # 화면 중앙 배치 및 강제 포커스
         del_win.attributes('-topmost', True)
         
-        lbl = tk.Label(del_win, text="삭제할 제품 ID 입력 (Home 키)", font=("Malgun Gothic", 12))
+        lbl = tk.Label(del_win, text="판매할 제품의 바코드를 스캔하세요 (Home 키)\n(또는 ID 직접 입력)", font=("Malgun Gothic", 12))
         lbl.pack(pady=10)
         
         entry = tk.Entry(del_win, font=("Arial", 14), justify='center')
-        entry.pack(pady=5)
+        entry.pack(pady=5, fill='x', padx=50)
         
         # 창이 뜨자마자 입력창에 커서가 가도록 설정
         # 동시에 한영 모드를 영문으로 강제 전환
@@ -251,24 +262,58 @@ class LensManagerApp:
         del_win.after(100, lambda: entry.focus_force())
         del_win.after(150, lambda: self._force_english_ime(entry))
 
+        result_lbl = tk.Label(del_win, text="대기 중...", font=("Malgun Gothic", 10), fg="gray")
+        result_lbl.pack(pady=10)
+
         def on_delete(event=None):
-            pid = entry.get().strip()
-            if pid.isdigit():
+            raw_input = entry.get().strip()
+            if not raw_input: return
+            
+            # 입력 초기화
+            entry.delete(0, tk.END)
+            
+            # 1. 숫자인 경우 ID로 삭제 시도
+            if raw_input.isdigit():
+                pid = int(raw_input)
                 if messagebox.askyesno("삭제 확인", f"정말로 ID {pid} 제품을 삭제하시겠습니까?", parent=del_win):
-                    if self.db.delete_product(int(pid)):
-                        messagebox.showinfo("성공", "삭제되었습니다.", parent=del_win)
-                        # 유통기한 상태 즉시 갱신
+                    if self.db.delete_product(pid):
+                        result_lbl.config(text=f"✅ ID {pid} 삭제 완료", fg="green")
                         self.check_expiry()
-                        del_win.destroy()
                     else:
-                        messagebox.showerror("실패", "삭제 실패. ID를 확인하세요.", parent=del_win)
-            else:
-                messagebox.showwarning("입력 오류", "숫자 ID를 입력하세요.", parent=del_win)
+                        result_lbl.config(text="❌ 삭제 실패 (ID 확인)", fg="red")
+                return
+
+            # 2. 바코드인 경우 UDI로 재고 차감 시도
+            try:
+                # 바코드 파싱 (한글 변환 포함)
+                parsed = self.parser.process_scanner_input(raw_input)
+                udi = parsed['udi']
+                
+                # 재고 차감 실행
+                res = self.db.decrement_stock_by_udi(udi)
+                
+                if res['success']:
+                    product = res['product']
+                    product_name = product['name']
+                    msg = res['message'] # "재고 1 감소..." 또는 "삭제됨..."
+                    
+                    # 상세 정보 포함한 메시지 구성
+                    display_msg = (
+                        f"✅ {msg}\n"
+                        f"제품명: {product_name}\n"
+                        f"도수: {product.get('power')} / 유통기한: {product.get('expire_date')}"
+                    )
+                    
+                    result_lbl.config(text=display_msg, fg="blue")
+                    self.check_expiry()
+                else:
+                    result_lbl.config(text=f"❌ 실패: {res['message']}", fg="red")
+                    
+            except Exception as e:
+                result_lbl.config(text=f"⚠️ 오류: {e}", fg="red")
 
         entry.bind("<Return>", on_delete)
-        
-        btn = tk.Button(del_win, text="삭제", command=on_delete, bg="red", fg="white", font=("Malgun Gothic", 10, "bold"))
-        btn.pack(pady=5)
+
 
     def show_expiring_list(self):
         """[버튼 클릭] 유통기한 임박 목록을 보여줍니다."""
