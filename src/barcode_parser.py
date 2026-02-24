@@ -26,77 +26,87 @@ class BarcodeParser:
             'name': ''
         }
 
-        # 순차적 파싱을 위해 문자열 복사
         remaining_str = clean_str
+        
+        # 무한 루프 방지를 위한 카운터
+        loop_limit = 20
+        
+        while remaining_str and loop_limit > 0:
+            loop_limit -= 1
+            matched = False
+            
+            # 1. GTIN (AI: 01) - 14자리
+            if remaining_str.startswith('01'):
+                if len(remaining_str) >= 16: # 01 + 14자리
+                    result['gtin'] = remaining_str[2:16]
+                    remaining_str = remaining_str[16:]
+                    matched = True
+                    continue
 
-        # 1. GTIN (AI: 01) - 고정 길이 14자리
-        if remaining_str.startswith('01'):
-            if len(remaining_str) >= 16: # 01 + 14자리
-                result['gtin'] = remaining_str[2:16]
-                remaining_str = remaining_str[16:]
+            # 2. 제조일자 (AI: 11) - 6자리 (YYMMDD)
+            if remaining_str.startswith('11'):
+                if len(remaining_str) >= 8:
+                    date_val = remaining_str[2:8]
+                    # 유효성 검사
+                    parsed_date = self._parse_date(date_val)
+                    if parsed_date:
+                        result['manufacture_date'] = parsed_date
+                        remaining_str = remaining_str[8:]
+                        matched = True
+                        continue
+
+            # 3. 유통기한 (AI: 17) - 6자리 (YYMMDD)
+            if remaining_str.startswith('17'):
+                if len(remaining_str) >= 8:
+                    date_val = remaining_str[2:8]
+                    parsed_date = self._parse_date(date_val, is_expiry=True)
+                    if parsed_date:
+                        result['expire_date'] = parsed_date
+                        remaining_str = remaining_str[8:]
+                        matched = True
+                        continue
+
+            # 4. LOT 번호 (AI: 10) - 가변 길이
+            if remaining_str.startswith('10'):
+                # 다음 AI 패턴 찾기 (11, 17, 21, 01 등)
+                # 정규식으로 가장 먼저 나오는 AI 패턴 찾기
+                match = re.search(r'(11\d{6}|17\d{6}|21|01\d{14})', remaining_str[2:])
+                
+                if match:
+                    # 매치된 위치 전까지가 LOT
+                    split_idx = match.start() + 2
+                    result['lot'] = remaining_str[2:split_idx]
+                    remaining_str = remaining_str[split_idx:]
+                else:
+                    # 뒤에 AI가 없으면 끝까지 LOT
+                    result['lot'] = remaining_str[2:]
+                    remaining_str = ""
+                matched = True
+                continue
+
+            # 5. 일련번호 (AI: 21) - 가변 길이
+            if remaining_str.startswith('21'):
+                # 다음 AI 패턴 찾기
+                match = re.search(r'(11\d{6}|17\d{6}|10|01\d{14})', remaining_str[2:])
+                
+                if match:
+                    split_idx = match.start() + 2
+                    remaining_str = remaining_str[split_idx:]
+                else:
+                    remaining_str = ""
+                matched = True
+                continue
+
+            # 매치되는 AI가 없으면 루프 종료
+            if not matched:
+                break
         
         # 01로 시작하지 않았더라도 중간에 있을 수 있음 (안전장치)
         if not result['gtin']:
             match = re.search(r'01(\d{14})', clean_str)
             if match:
                 result['gtin'] = match.group(1)
-                # 이미 파싱된 부분 제거는 복잡하므로 여기서는 값만 추출
 
-        # 2. 날짜 정보 파싱 (AI: 11, 17) - 고정 길이 6자리
-        # 순서가 섞여 있을 수 있으므로 반복적으로 찾기
-        while True:
-            found = False
-            # 제조일자 (11)
-            if remaining_str.startswith('11'):
-                if len(remaining_str) >= 8: # 11 + 6자리
-                    date_val = remaining_str[2:8]
-                    # 유효한 날짜인지 확인
-                    parsed_date = self._parse_date(date_val)
-                    if parsed_date:
-                        result['manufacture_date'] = parsed_date
-                        remaining_str = remaining_str[8:]
-                        found = True
-                        continue
-
-            # 유통기한 (17)
-            if remaining_str.startswith('17'):
-                if len(remaining_str) >= 8: # 17 + 6자리
-                    date_val = remaining_str[2:8]
-                    parsed_date = self._parse_date(date_val, is_expiry=True)
-                    if parsed_date:
-                        result['expire_date'] = parsed_date
-                        remaining_str = remaining_str[8:]
-                        found = True
-                        continue
-            
-            if not found:
-                break
-
-        # 3. LOT 번호 (AI: 10) - 가변 길이
-        if remaining_str.startswith('10'):
-            # LOT 번호 뒤에 다른 AI가 올 수 있음
-            lot_raw = remaining_str[2:]
-            
-            # 뒤에 11(제조일), 17(유통기한), 21(일련번호) 같은 AI 패턴이 나오면 끊어야 함
-            # 정규식으로 가장 먼저 나오는 AI 패턴 찾기
-            # 주의: LOT 번호 자체에 숫자가 포함될 수 있으므로, AI 패턴과 구분하기 어려움.
-            # 하지만 GS1 표준상 AI 앞에는 FNC1이 있어야 함. 여기서는 FNC1이 없으므로 추정해야 함.
-            
-            # 우리가 처리하지 못한 11, 17이 뒤에 남아있다면 여기서 끊어줌
-            match = re.search(r'(11\d{6}|17\d{6}|21)', lot_raw)
-            if match:
-                lot_val = lot_raw[:match.start()]
-            else:
-                lot_val = lot_raw
-            
-            result['lot'] = lot_val
-
-        # 만약 순차 파싱으로 LOT를 못 찾았는데, 원본 문자열에는 있었던 경우 (순서가 섞인 경우)
-        if result['lot'] == 'N/A' and '10' in clean_str:
-             # GTIN(01)과 날짜(11, 17)를 제외한 나머지 문자열에서 찾기
-             # (이 부분은 매우 복잡해질 수 있어 생략하거나 간단히 처리)
-             pass
-        
         # 유통기한 기본값 처리
         if not result['expire_date']:
             result['expire_date'] = "9999-12-31"
