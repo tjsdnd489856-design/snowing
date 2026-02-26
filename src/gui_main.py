@@ -240,13 +240,20 @@ class LensManagerApp:
 
                         new_expire = simpledialog.askstring(
                             "유통기한 입력", 
-                            f"제품명: {new_name}\n도수: {new_power}\n\n새로운 제품의 유통기한을 입력해주세요 (예: 2026-12-31)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
+                            f"제품명: {new_name}\n도수: {new_power}\n\n새로운 제품의 유통기한을 입력해주세요 (예: 2026-12-31 또는 261231)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
                             parent=scan_win
                         )
                         if not new_expire:
                             result_lbl.config(text="❌ 등록 취소됨 (유통기한 없음)", fg="red")
                             return
-                            
+                        
+                        # 사용자가 6자리 숫자(YYMMDD)로 입력한 경우 YYYY-MM-DD 형식으로 자동 변환
+                        new_expire = new_expire.strip()
+                        if len(new_expire) == 6 and new_expire.isdigit():
+                            converted_date = self.parser._parse_date(new_expire, is_expiry=True)
+                            if converted_date:
+                                new_expire = converted_date
+
                         # 수동 입력받은 정보로 덮어쓰기
                         parsed['name'] = new_name
                         parsed['power'] = new_power
