@@ -213,13 +213,25 @@ class LensManagerApp:
                         "중복 재고 확인",
                         f"동일한 상품 번호(01)를 가진 제품이 이미 등록되어 있습니다.\n\n"
                         f"기존 제품명: {existing_product['name']}\n\n"
-                        f"계속해서 이 제품의 재고를 추가하시겠습니까?",
+                        f"기존 재고에 수량을 추가하시겠습니까?\n"
+                        f"([아니오]를 누르면 유통기한을 새로 입력받아 별도의 재고로 추가합니다)",
                         parent=scan_win
                     )
-                    # 아니오를 선택하면 등록을 취소하고 함수 종료
+                    # 아니오를 선택하면 새로운 구분의 재고로 분리
                     if not confirm:
-                        result_lbl.config(text="❌ 중복으로 인한 등록 취소", fg="red")
-                        return
+                        new_expire = simpledialog.askstring(
+                            "유통기한 입력 (새 재고)", 
+                            "새로운 구분의 재고로 분리하여 추가합니다.\n\n유통기한을 입력해주세요 (예: 2026-12-31)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
+                            parent=scan_win
+                        )
+                        if new_expire:
+                            parsed['expire_date'] = new_expire
+                            # 새로운 UDI를 부여하여 무조건 DB에 새 행으로 등록되게 처리
+                            import time
+                            parsed['udi'] = f"{raw_barcode}_{int(time.time())}"
+                        else:
+                            result_lbl.config(text="❌ 등록 취소됨", fg="red")
+                            return
 
                 api_info = self.api.fetch_product_info(gtin)
                 final_data = self.api.sync_with_local_db(api_info, parsed)
