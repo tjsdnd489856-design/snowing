@@ -214,25 +214,64 @@ class LensManagerApp:
                         f"동일한 상품 번호(01)를 가진 제품이 이미 등록되어 있습니다.\n\n"
                         f"기존 제품명: {existing_product['name']}\n\n"
                         f"기존 재고에 수량을 추가하시겠습니까?\n"
-                        f"([아니오]를 누르면 유통기한을 새로 입력받아 별도의 재고로 추가합니다)",
+                        f"([아니오]를 누르면 완전히 새로운 제품으로 분리하여 등록합니다)",
                         parent=scan_win
                     )
-                    # 아니오를 선택하면 새로운 구분의 재고로 분리
+                    # 아니오를 선택하면 완전히 새로운 제품으로 등록 (제품명, 유통기한 등 모두 새로 받음)
                     if not confirm:
-                        new_expire = simpledialog.askstring(
-                            "유통기한 입력 (새 재고)", 
-                            "새로운 구분의 재고로 분리하여 추가합니다.\n\n유통기한을 입력해주세요 (예: 2026-12-31)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
+                        # 기존 정보 무시하고 백지 상태로 시작
+                        new_name = simpledialog.askstring(
+                            "새 제품명 입력", 
+                            "완전히 새로운 제품으로 등록합니다.\n\n새로운 제품의 이름을 입력해주세요.\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
                             parent=scan_win
                         )
-                        if new_expire:
-                            parsed['expire_date'] = new_expire
-                            # 새로운 UDI를 부여하여 무조건 DB에 새 행으로 등록되게 처리
-                            import time
-                            parsed['udi'] = f"{raw_barcode}_{int(time.time())}"
-                        else:
-                            result_lbl.config(text="❌ 등록 취소됨", fg="red")
+                        if not new_name:
+                            result_lbl.config(text="❌ 등록 취소됨 (제품명 없음)", fg="red")
+                            return
+                            
+                        new_power = simpledialog.askstring(
+                            "도수 입력", 
+                            f"제품명: {new_name}\n\n새로운 제품의 도수를 입력해주세요 (예: -3.50)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
+                            parent=scan_win
+                        )
+                        if not new_power:
+                            result_lbl.config(text="❌ 등록 취소됨 (도수 없음)", fg="red")
                             return
 
+                        new_expire = simpledialog.askstring(
+                            "유통기한 입력", 
+                            f"제품명: {new_name}\n도수: {new_power}\n\n새로운 제품의 유통기한을 입력해주세요 (예: 2026-12-31)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
+                            parent=scan_win
+                        )
+                        if not new_expire:
+                            result_lbl.config(text="❌ 등록 취소됨 (유통기한 없음)", fg="red")
+                            return
+                            
+                        # 수동 입력받은 정보로 덮어쓰기
+                        parsed['name'] = new_name
+                        parsed['power'] = new_power
+                        parsed['expire_date'] = new_expire
+                        # 새로운 UDI와 GTIN을 부여하여 완전히 다른 제품으로 인식되게 처리
+                        import time
+                        unique_id = int(time.time())
+                        parsed['udi'] = f"{raw_barcode}_{unique_id}"
+                        # GTIN도 다르게 설정해야 나중에 중복 체크나 판매 시 꼬이지 않음
+                        parsed['gtin'] = f"{gtin}_{unique_id}"
+                        
+                        # API 동기화 건너뛰고 바로 DB 저장으로 이동
+                        if self.db.upsert_product(parsed):
+                            success_msg = (
+                                f"✅ 신규 등록 완료!\n"
+                                f"제품명: {parsed['name']}\n"
+                                f"도수: {parsed['power']} / 유통기한: {parsed['expire_date']}"
+                            )
+                            result_lbl.config(text=success_msg, fg="green")
+                            self.check_expiry()
+                        else:
+                            result_lbl.config(text="❌ 저장 실패 (DB 오류)", fg="red")
+                        return # 새 제품 등록 완료 후 함수 종료 (기존 로직 안 타게)
+
+                # '예'를 누르거나, 아예 처음 등록하는 제품인 경우 기존 로직 수행
                 api_info = self.api.fetch_product_info(gtin)
                 final_data = self.api.sync_with_local_db(api_info, parsed)
                 
