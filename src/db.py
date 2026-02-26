@@ -212,6 +212,38 @@ class Database:
         except sqlite3.Error as e:
             return {'success': False, 'message': f"DB 오류: {e}", 'product': None}
 
+    def decrement_stock_by_gtin(self, gtin: str) -> Dict[str, Any]:
+        """GTIN(상품번호)에 해당하는 제품 중 유통기한이 가장 임박한 재고를 1 감소시킵니다."""
+        try:
+            # 재고가 있는 제품 중 유통기한이 가장 짧은 것(가장 먼저 팔아야 할 것)을 조회
+            cursor = self.conn.execute(
+                "SELECT * FROM products WHERE gtin = ? AND qty > 0 ORDER BY expire_date ASC LIMIT 1", 
+                (gtin,)
+            )
+            row = cursor.fetchone()
+            
+            if not row:
+                return {'success': False, 'message': '해당 상품번호의 남은 재고를 찾을 수 없습니다.', 'product': None}
+            
+            product = dict(row)
+            new_qty = product['qty'] - 1
+            udi = product['udi'] # 실제 업데이트는 UDI(고유번호) 기준으로 수행
+            
+            with self.conn:
+                if new_qty <= 0:
+                    new_qty = 0
+                    self.conn.execute("UPDATE products SET qty = ? WHERE udi = ?", (new_qty, udi))
+                    msg = f"재고 소진 (남은 수량: 0): {product['name']}"
+                else:
+                    self.conn.execute("UPDATE products SET qty = ? WHERE udi = ?", (new_qty, udi))
+                    msg = f"재고 1 감소 (남은 수량: {new_qty}): {product['name']}"
+            
+            product['qty'] = new_qty
+            return {'success': True, 'message': msg, 'product': product}
+            
+        except sqlite3.Error as e:
+            return {'success': False, 'message': f"DB 오류: {e}", 'product': None}
+
     def delete_product(self, product_id: int) -> bool:
         """제품 강제 삭제 (Home키를 통한 ID 삭제)"""
         try:

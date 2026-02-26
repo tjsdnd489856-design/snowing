@@ -266,7 +266,7 @@ class LensManagerApp:
         self.center_window(del_win, 500, 200) # 화면 중앙 배치 및 강제 포커스
         del_win.attributes('-topmost', True)
         
-        lbl = tk.Label(del_win, text="판매할 제품의 바코드를 스캔하세요 (Home 키)\n(또는 ID 직접 입력)", font=("Malgun Gothic", 12))
+        lbl = tk.Label(del_win, text="판매할 바코드를 스캔하거나\n상품번호(GTIN)/ID를 직접 입력하세요", font=("Malgun Gothic", 12))
         lbl.pack(pady=10)
         
         entry = tk.Entry(del_win, font=("Arial", 14), justify='center')
@@ -288,18 +288,37 @@ class LensManagerApp:
             # 입력 초기화
             entry.delete(0, tk.END)
             
-            # 1. 숫자인 경우 ID로 삭제 시도
+            # 1. 숫자만 입력된 경우 확인 (GTIN 직접 입력 vs ID 삭제)
             if raw_input.isdigit():
-                pid = int(raw_input)
-                if messagebox.askyesno("삭제 확인", f"정말로 ID {pid} 제품을 완전히 삭제하시겠습니까?", parent=del_win):
-                    if self.db.delete_product(pid):
-                        result_lbl.config(text=f"✅ ID {pid} 삭제 완료", fg="green")
+                # 길이가 13자리 이상이면 상품번호(GTIN) 수동 입력으로 판단
+                if len(raw_input) >= 13:
+                    res = self.db.decrement_stock_by_gtin(raw_input)
+                    if res['success']:
+                        product = res['product']
+                        product_name = product['name']
+                        msg = res['message']
+                        display_msg = (
+                            f"✅ {msg}\n"
+                            f"제품명: {product_name}\n"
+                            f"도수: {product.get('power')} / 유통기한: {product.get('expire_date')}"
+                        )
+                        result_lbl.config(text=display_msg, fg="blue")
                         self.check_expiry()
                     else:
-                        result_lbl.config(text="❌ 삭제 실패 (ID 확인)", fg="red")
-                return
+                        result_lbl.config(text=f"❌ 실패: {res['message']}", fg="red")
+                    return
+                # 짧은 숫자면 기존처럼 ID로 판단하여 제품 자체를 강제 삭제
+                else:
+                    pid = int(raw_input)
+                    if messagebox.askyesno("삭제 확인", f"정말로 ID {pid} 제품을 완전히 삭제하시겠습니까?", parent=del_win):
+                        if self.db.delete_product(pid):
+                            result_lbl.config(text=f"✅ ID {pid} 삭제 완료", fg="green")
+                            self.check_expiry()
+                        else:
+                            result_lbl.config(text="❌ 삭제 실패 (ID 확인)", fg="red")
+                    return
 
-            # 2. 바코드인 경우 UDI로 재고 차감 시도
+            # 2. 긴 바코드(영문, 괄호 등 포함)인 경우 전체 파싱 후 UDI로 재고 차감 시도
             try:
                 # 바코드 파싱 (한글 변환 포함)
                 parsed = self.parser.process_scanner_input(raw_input)
