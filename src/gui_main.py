@@ -206,96 +206,35 @@ class LensManagerApp:
                 parsed = self.parser.process_scanner_input(raw_barcode)
                 gtin = parsed.get('gtin')
                 
-                # 중복 등록(GTIN 기준) 사전 확인
+                # 기존 DB에서 GTIN으로 정보 조회
                 existing_product = self.db.get_product_by_gtin(gtin)
+                
                 if existing_product:
-                    confirm = messagebox.askyesno(
-                        "중복 재고 확인",
-                        f"동일한 상품 번호(01)를 가진 제품이 이미 등록되어 있습니다.\n\n"
-                        f"기존 제품명: {existing_product['name']}\n\n"
-                        f"기존 재고에 수량을 추가하시겠습니까?\n"
-                        f"([아니오]를 누르면 완전히 새로운 제품으로 분리하여 등록합니다)",
-                        parent=scan_win
-                    )
-                    # 아니오를 선택하면 완전히 새로운 제품으로 등록 (제품명, 유통기한 등 모두 새로 받음)
-                    if not confirm:
-                        # 기존 정보 무시하고 백지 상태로 시작
-                        new_name = simpledialog.askstring(
-                            "새 제품명 입력", 
-                            "완전히 새로운 제품으로 등록합니다.\n\n새로운 제품의 이름을 입력해주세요.\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
-                            parent=scan_win
-                        )
-                        if not new_name:
+                    # 이미 등록된 GTIN이면, 프로그램 자체적으로 바코드에서 파싱된 유통기한을 기반으로
+                    # 이름과 도수는 기존 데이터를 자동으로 사용 (중복 확인 및 수동 입력 불필요)
+                    parsed['name'] = existing_product['name']
+                    parsed['power'] = existing_product['power']
+                    final_data = parsed
+                else:
+                    # 신규 GTIN인 경우에만 API 검색 및 수동 입력 진행
+                    api_info = self.api.fetch_product_info(gtin)
+                    final_data = self.api.sync_with_local_db(api_info, parsed)
+                    
+                    if not final_data.get('name'):
+                        manual_name = simpledialog.askstring("제품명 입력", f"제품명을 찾을 수 없습니다.\nGTIN: {gtin}\n제품명을 입력해주세요:", parent=scan_win)
+                        if manual_name:
+                            final_data['name'] = manual_name
+                        else:
                             result_lbl.config(text="❌ 등록 취소됨 (제품명 없음)", fg="red")
                             return
-                            
-                        new_power = simpledialog.askstring(
-                            "도수 입력", 
-                            f"제품명: {new_name}\n\n새로운 제품의 도수를 입력해주세요 (예: -3.50)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
-                            parent=scan_win
-                        )
-                        if not new_power:
-                            result_lbl.config(text="❌ 등록 취소됨 (도수 없음)", fg="red")
-                            return
 
-                        new_expire = simpledialog.askstring(
-                            "유통기한 입력", 
-                            f"제품명: {new_name}\n도수: {new_power}\n\n새로운 제품의 유통기한을 입력해주세요 (예: 2026-12-31 또는 261231)\n\n※ 입력을 취소하면 등록이 중단됩니다.", 
-                            parent=scan_win
-                        )
-                        if not new_expire:
-                            result_lbl.config(text="❌ 등록 취소됨 (유통기한 없음)", fg="red")
-                            return
-                        
-                        # 사용자가 6자리 숫자(YYMMDD)로 입력한 경우 YYYY-MM-DD 형식으로 자동 변환
-                        new_expire = new_expire.strip()
-                        if len(new_expire) == 6 and new_expire.isdigit():
-                            converted_date = self.parser._parse_date(new_expire, is_expiry=True)
-                            if converted_date:
-                                new_expire = converted_date
+                    # 도수 정보가 없는 경우 수동 입력 요청
+                    if final_data.get('power') == 'N/A':
+                        manual_power = simpledialog.askstring("도수 입력", f"도수 정보를 찾을 수 없습니다.\n제품명: {final_data['name']}\n도수를 입력해주세요 (예: -3.50):", parent=scan_win)
+                        if manual_power:
+                            final_data['power'] = manual_power
 
-                        # 수동 입력받은 정보로 덮어쓰기
-                        parsed['name'] = new_name
-                        parsed['power'] = new_power
-                        parsed['expire_date'] = new_expire
-                        # 새로운 UDI와 GTIN을 부여하여 완전히 다른 제품으로 인식되게 처리
-                        import time
-                        unique_id = int(time.time())
-                        parsed['udi'] = f"{raw_barcode}_{unique_id}"
-                        # GTIN도 다르게 설정해야 나중에 중복 체크나 판매 시 꼬이지 않음
-                        parsed['gtin'] = f"{gtin}_{unique_id}"
-                        
-                        # API 동기화 건너뛰고 바로 DB 저장으로 이동
-                        if self.db.upsert_product(parsed):
-                            success_msg = (
-                                f"✅ 신규 등록 완료!\n"
-                                f"제품명: {parsed['name']}\n"
-                                f"도수: {parsed['power']} / 유통기한: {parsed['expire_date']}"
-                            )
-                            result_lbl.config(text=success_msg, fg="green")
-                            self.check_expiry()
-                        else:
-                            result_lbl.config(text="❌ 저장 실패 (DB 오류)", fg="red")
-                        return # 새 제품 등록 완료 후 함수 종료 (기존 로직 안 타게)
-
-                # '예'를 누르거나, 아예 처음 등록하는 제품인 경우 기존 로직 수행
-                api_info = self.api.fetch_product_info(gtin)
-                final_data = self.api.sync_with_local_db(api_info, parsed)
-                
-                if not final_data.get('name'):
-                    manual_name = simpledialog.askstring("제품명 입력", f"제품명을 찾을 수 없습니다.\nGTIN: {gtin}\n제품명을 입력해주세요:", parent=scan_win)
-                    if manual_name:
-                        final_data['name'] = manual_name
-                    else:
-                        result_lbl.config(text="❌ 등록 취소됨 (제품명 없음)", fg="red")
-                        return
-
-                # 도수 정보가 없는 경우 수동 입력 요청
-                if final_data.get('power') == 'N/A':
-                    manual_power = simpledialog.askstring("도수 입력", f"도수 정보를 찾을 수 없습니다.\n제품명: {final_data['name']}\n도수를 입력해주세요 (예: -3.50):", parent=scan_win)
-                    if manual_power:
-                        final_data['power'] = manual_power
-
+                # 공통 저장 로직 (UDI가 같으면 DB단에서 자동으로 수량증가, 다르면 새 데이터로 등록)
                 if self.db.upsert_product(final_data):
                     success_msg = (
                         f"✅ 등록 완료!\n"
@@ -321,7 +260,7 @@ class LensManagerApp:
     def _create_delete_window(self):
         del_win = tk.Toplevel(self.root)
         del_win.title("📤 판매 (재고 차감)")
-        self.center_window(del_win, 500, 200) # 화면 중앙 배치 및 강제 포커스
+        self.center_window(del_win, 500, 240) # 창 높이 조금 증가
         del_win.attributes('-topmost', True)
         
         lbl = tk.Label(del_win, text="판매할 바코드를 스캔하거나\n상품번호(GTIN)/ID를 직접 입력하세요", font=("Malgun Gothic", 12))
@@ -330,6 +269,18 @@ class LensManagerApp:
         entry = tk.Entry(del_win, font=("Arial", 14), justify='center')
         entry.pack(pady=5, fill='x', padx=50)
         
+        # 수동 판매 버튼 추가
+        manual_btn = tk.Button(
+            del_win,
+            text="📋 수동 판매 (재고 목록에서 수량 변경)",
+            font=("Malgun Gothic", 10, "bold"),
+            bg="#f57c00", fg="white",
+            activebackground="#e65100", activeforeground="white",
+            relief="flat",
+            command=self.open_manual_sales_window
+        )
+        manual_btn.pack(pady=5)
+
         # 창이 뜨자마자 입력창에 커서가 가도록 설정
         # 동시에 한영 모드를 영문으로 강제 전환
         entry.bind("<FocusIn>", lambda e: self._force_english_ime(entry))
@@ -337,7 +288,7 @@ class LensManagerApp:
         del_win.after(150, lambda: self._force_english_ime(entry))
 
         result_lbl = tk.Label(del_win, text="대기 중...", font=("Malgun Gothic", 10), fg="gray")
-        result_lbl.pack(pady=10)
+        result_lbl.pack(pady=5)
 
         def on_delete(event=None):
             raw_input = entry.get().strip()
@@ -417,6 +368,76 @@ class LensManagerApp:
 
         entry.bind("<Return>", on_delete)
 
+    def open_manual_sales_window(self):
+        """수동 판매 (재고 목록 및 수량 변경) 윈도우를 엽니다."""
+        manual_win = tk.Toplevel(self.root)
+        manual_win.title("📋 재고 목록 (수동 수량 변경)")
+        self.center_window(manual_win, 800, 500)
+        manual_win.attributes('-topmost', True)
+        
+        lbl = tk.Label(manual_win, text="목록을 더블클릭하여 해당 제품의 수량을 변경할 수 있습니다.", font=("Malgun Gothic", 11, "bold"), fg="#1565c0")
+        lbl.pack(pady=10)
+
+        cols = ("ID", "제품명", "도수", "유통기한", "수량")
+        tree = ttk.Treeview(manual_win, columns=cols, show='headings')
+        
+        tree.heading("ID", text="ID")
+        tree.column("ID", width=50, anchor="center")
+        tree.heading("제품명", text="제품명")
+        tree.column("제품명", width=350)
+        tree.heading("도수", text="도수")
+        tree.column("도수", width=80, anchor="center")
+        tree.heading("유통기한", text="유통기한")
+        tree.column("유통기한", width=100, anchor="center")
+        tree.heading("수량", text="수량")
+        tree.column("수량", width=80, anchor="center")
+        
+        tree.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(manual_win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        
+        def load_data():
+            for item in tree.get_children():
+                tree.delete(item)
+            products = self.db.list_products()
+            for p in products:
+                # 수량이 0인 항목은 회색으로 표시하기 위해 태그 사용
+                tags = ('zero_qty',) if p['qty'] <= 0 else ()
+                tree.insert("", "end", values=(p['id'], p['name'], p['power'], p['expire_date'], p['qty']), tags=tags)
+            
+            tree.tag_configure('zero_qty', foreground='gray')
+
+        load_data()
+        
+        def on_double_click(event):
+            selected = tree.selection()
+            if not selected: return
+            item = tree.item(selected[0])
+            values = item['values']
+            pid = values[0]
+            name = values[1]
+            current_qty = values[4]
+            
+            # 숫자 입력 다이얼로그 (초기값으로 현재 수량 제공)
+            new_qty = simpledialog.askinteger(
+                "수량 변경", 
+                f"선택한 제품: {name}\n현재 수량: {current_qty}개\n\n새로운 수량을 입력하세요:", 
+                initialvalue=current_qty, 
+                minvalue=0, 
+                parent=manual_win
+            )
+            
+            if new_qty is not None and new_qty != current_qty:
+                if self.db.update_product_qty(pid, new_qty):
+                    messagebox.showinfo("완료", f"수량이 {new_qty}개로 변경되었습니다.", parent=manual_win)
+                    load_data()
+                    self.check_expiry() # 유통기한 알림 다시 계산
+                else:
+                    messagebox.showerror("오류", "수량 변경에 실패했습니다.", parent=manual_win)
+
+        tree.bind("<Double-1>", on_double_click)
 
     def show_expiring_list(self):
         """[버튼 클릭] 유통기한 임박 목록을 보여줍니다."""

@@ -244,6 +244,16 @@ class Database:
         except sqlite3.Error as e:
             return {'success': False, 'message': f"DB 오류: {e}", 'product': None}
 
+    def update_product_qty(self, product_id: int, new_qty: int) -> bool:
+        """특정 ID의 제품 수량을 직접 변경합니다."""
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE products SET qty = ? WHERE id = ?", (new_qty, product_id))
+            return True
+        except sqlite3.Error as e:
+            sys.stderr.write(f"수량 변경 중 오류: {e}\n")
+            return False
+
     def delete_product(self, product_id: int) -> bool:
         """제품 강제 삭제 (Home키를 통한 ID 삭제)"""
         try:
