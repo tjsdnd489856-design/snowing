@@ -5,6 +5,7 @@ import time
 import sys
 import ctypes
 import pystray
+from datetime import datetime
 from PIL import Image
 from pystray import MenuItem as item
 import keyboard
@@ -205,6 +206,21 @@ class LensManagerApp:
                 parsed = self.parser.process_scanner_input(raw_barcode)
                 gtin = parsed.get('gtin')
                 
+                # 중복 등록(GTIN 기준) 사전 확인
+                existing_product = self.db.get_product_by_gtin(gtin)
+                if existing_product:
+                    confirm = messagebox.askyesno(
+                        "중복 재고 확인",
+                        f"동일한 상품 번호(01)를 가진 제품이 이미 등록되어 있습니다.\n\n"
+                        f"기존 제품명: {existing_product['name']}\n\n"
+                        f"계속해서 이 제품의 재고를 추가하시겠습니까?",
+                        parent=scan_win
+                    )
+                    # 아니오를 선택하면 등록을 취소하고 함수 종료
+                    if not confirm:
+                        result_lbl.config(text="❌ 중복으로 인한 등록 취소", fg="red")
+                        return
+
                 api_info = self.api.fetch_product_info(gtin)
                 final_data = self.api.sync_with_local_db(api_info, parsed)
                 
@@ -275,7 +291,7 @@ class LensManagerApp:
             # 1. 숫자인 경우 ID로 삭제 시도
             if raw_input.isdigit():
                 pid = int(raw_input)
-                if messagebox.askyesno("삭제 확인", f"정말로 ID {pid} 제품을 삭제하시겠습니까?", parent=del_win):
+                if messagebox.askyesno("삭제 확인", f"정말로 ID {pid} 제품을 완전히 삭제하시겠습니까?", parent=del_win):
                     if self.db.delete_product(pid):
                         result_lbl.config(text=f"✅ ID {pid} 삭제 완료", fg="green")
                         self.check_expiry()
@@ -295,7 +311,7 @@ class LensManagerApp:
                 if res['success']:
                     product = res['product']
                     product_name = product['name']
-                    msg = res['message'] # "재고 1 감소..." 또는 "삭제됨..."
+                    msg = res['message'] # "재고 1 감소..." 또는 "재고 소진..."
                     
                     # 상세 정보 포함한 메시지 구성
                     display_msg = (
@@ -304,7 +320,17 @@ class LensManagerApp:
                         f"도수: {product.get('power')} / 유통기한: {product.get('expire_date')}"
                     )
                     
-                    result_lbl.config(text=display_msg, fg="blue")
+                    # 유통기한 경과 확인
+                    try:
+                        exp_date = datetime.strptime(product.get('expire_date'), "%Y-%m-%d").date()
+                        if exp_date < datetime.now().date():
+                            display_msg += "\n⚠️ 유통기한이 지난 제품입니다!"
+                            result_lbl.config(text=display_msg, fg="red")
+                        else:
+                            result_lbl.config(text=display_msg, fg="blue")
+                    except Exception:
+                        result_lbl.config(text=display_msg, fg="blue")
+
                     self.check_expiry()
                 else:
                     result_lbl.config(text=f"❌ 실패: {res['message']}", fg="red")

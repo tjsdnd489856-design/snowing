@@ -58,6 +58,16 @@ class Database:
         except sqlite3.Error:
             return None
 
+    def get_product_by_gtin(self, gtin: str) -> Optional[Dict[str, Any]]:
+        """GTIN(상품번호)으로 등록된 제품이 있는지 확인합니다."""
+        query = "SELECT * FROM products WHERE gtin = ? LIMIT 1"
+        try:
+            cursor = self.conn.execute(query, (gtin,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except sqlite3.Error:
+            return None
+
     def upsert_product(self, data: Dict[str, Any]) -> bool:
         """제품 정보를 저장하거나 업데이트합니다."""
         if 'expire_date' in data:
@@ -127,8 +137,9 @@ class Database:
 
         try:
             # 모든 제품을 가져와서 파이썬에서 필터링 (복잡한 조건 처리 위함)
+            # 재고가 0 초과인 제품만 유통기한 알림 대상에 포함
             with self.conn:
-                cursor = self.conn.execute("SELECT * FROM products")
+                cursor = self.conn.execute("SELECT * FROM products WHERE qty > 0")
                 all_products = [dict(row) for row in cursor.fetchall()]
 
             for p in all_products:
@@ -169,7 +180,7 @@ class Database:
             return {"expired": [], "expiring": []}
 
     def decrement_stock_by_udi(self, udi: str) -> Dict[str, Any]:
-        """UDI에 해당하는 제품의 재고를 1 감소시킵니다."""
+        """UDI에 해당하는 제품의 재고를 1 감소시킵니다. 재고가 0이 되어도 삭제하지 않습니다."""
         try:
             # 제품 조회
             cursor = self.conn.execute("SELECT * FROM products WHERE udi = ?", (udi,))
@@ -179,12 +190,18 @@ class Database:
                 return {'success': False, 'message': '제품을 찾을 수 없습니다.', 'product': None}
             
             product = dict(row)
+            
+            # 이미 0 이하인 경우 더 이상 차감하지 않고 안내
+            if product['qty'] <= 0:
+                return {'success': False, 'message': f"이미 재고가 0인 제품입니다: {product['name']}", 'product': product}
+
             new_qty = product['qty'] - 1
             
             with self.conn:
                 if new_qty <= 0:
-                    self.conn.execute("DELETE FROM products WHERE udi = ?", (udi,))
-                    msg = f"재고 소진으로 삭제됨: {product['name']}"
+                    new_qty = 0
+                    self.conn.execute("UPDATE products SET qty = ? WHERE udi = ?", (new_qty, udi))
+                    msg = f"재고 소진 (남은 수량: 0): {product['name']}"
                 else:
                     self.conn.execute("UPDATE products SET qty = ? WHERE udi = ?", (new_qty, udi))
                     msg = f"재고 1 감소 (남은 수량: {new_qty}): {product['name']}"
@@ -196,13 +213,26 @@ class Database:
             return {'success': False, 'message': f"DB 오류: {e}", 'product': None}
 
     def delete_product(self, product_id: int) -> bool:
-        """제품 삭제"""
+        """제품 강제 삭제 (Home키를 통한 ID 삭제)"""
         try:
             with self.conn:
                 self.conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
             return True
         except sqlite3.Error:
             return False
+
+    def update_expiry_for_default_items(self, new_date: str = '2031-03-31') -> int:
+        """기본값(9999-12-31)으로 설정된 유통기한을 일괄 수정합니다."""
+        try:
+            with self.conn:
+                cursor = self.conn.execute(
+                    "UPDATE products SET expire_date = ? WHERE expire_date = '9999-12-31'", 
+                    (new_date,)
+                )
+                return cursor.rowcount
+        except sqlite3.Error as e:
+            sys.stderr.write(f"유통기한 일괄 수정 중 오류: {e}\n")
+            return 0
 
     def close(self):
         """데이터베이스 연결을 닫습니다."""
